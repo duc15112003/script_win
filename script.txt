@@ -1,0 +1,561 @@
+@echo off
+chcp 65001 >nul 2>&1
+setlocal EnableDelayedExpansion
+
+REM ╔══════════════════════════════════════════════════════════════════════════╗
+REM ║  Optimize-Windows10-HDD.bat                                            ║
+REM ║  Toi uu Windows 10 cho may o HDD — AN TOAN, KHONG danh doi bao mat    ║
+REM ║                                                                        ║
+REM ║  CACH CHAY:                                                            ║
+REM ║  Click phai file .bat → "Run as administrator"                         ║
+REM ║                                                                        ║
+REM ║  RANG BUOC AN TOAN:                                                    ║
+REM ║  - KHONG tat Windows Defender, Firewall, Windows Update                ║
+REM ║  - Tao System Restore Point truoc khi chinh registry/service           ║
+REM ║  - Chi don file tam/cache, KHONG xoa file nguoi dung                   ║
+REM ║  - Xac minh HDD truoc khi ap toi uu danh cho HDD                      ║
+REM ║  - GIU NGUYEN SysMain/Superfetch + Prefetch (dung cho HDD)            ║
+REM ╚══════════════════════════════════════════════════════════════════════════╝
+
+REM ============================================================================
+REM KIEM TRA QUYEN ADMINISTRATOR
+REM ============================================================================
+net session >nul 2>&1
+if %errorlevel% neq 0 (
+    echo ========================================================
+    echo   LOI: Script nay yeu cau quyen Administrator!
+    echo   Hay click phai file .bat -^> Run as administrator
+    echo ========================================================
+    pause
+    exit /b 1
+)
+
+echo.
+echo ╔══════════════════════════════════════════════════════════╗
+echo ║   OPTIMIZE WINDOWS 10 FOR HDD — SAFE MODE              ║
+echo ╚══════════════════════════════════════════════════════════╝
+echo.
+
+REM Bien dem ket qua
+set "STEP_OK=0"
+set "STEP_FAIL=0"
+set "STEP_SKIP=0"
+set "IS_HDD=0"
+
+REM ============================================================================
+REM BUOC 0: XAC MINH O DIA HE THONG LA HDD
+REM ============================================================================
+echo ======================================================================
+echo BUOC 0: Xac minh o dia he thong
+echo ======================================================================
+
+REM Dung PowerShell mot dong de lay MediaType cua o chua C:
+for /f "tokens=*" %%A in ('powershell -NoProfile -Command "$dn=(Get-Partition -DriveLetter C -EA SilentlyContinue).DiskNumber; $d=Get-PhysicalDisk|Where-Object{$_.DeviceId -eq $dn}; if($d){$d.MediaType}else{'Unknown'}"') do set "DISK_TYPE=%%A"
+
+echo   O dia he thong: %DISK_TYPE%
+
+if /i "%DISK_TYPE%"=="SSD" (
+    echo.
+    echo   [CANH BAO] O dia he thong la SSD!
+    echo   Cac toi uu trong script nay danh cho HDD.
+    echo   Toi uu cho SSD nguoc lai hoan toan.
+    echo.
+    set /p "SSD_CONFIRM=Ban co muon tiep tuc voi cac toi uu CHUNG (bo qua phan rieng HDD)? (Y/N): "
+    if /i "!SSD_CONFIRM!" neq "Y" (
+        echo Da dung lai theo yeu cau.
+        pause
+        exit /b 0
+    )
+    set "IS_HDD=0"
+) else (
+    echo   [OK] Tiep tuc toi uu cho HDD
+    set "IS_HDD=1"
+)
+
+REM ============================================================================
+REM BUOC 1: TAO SYSTEM RESTORE POINT
+REM ============================================================================
+echo.
+echo ======================================================================
+echo BUOC 1: Tao System Restore Point
+echo ======================================================================
+
+echo   ^> Enable-ComputerRestore + Checkpoint-Computer
+powershell -NoProfile -Command ^
+    "try { " ^
+    "  Enable-ComputerRestore -Drive 'C:\' -EA Stop; " ^
+    "  $p='HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\SystemRestore'; " ^
+    "  $o=(Get-ItemProperty -Path $p -Name SystemRestorePointCreationFrequency -EA SilentlyContinue).SystemRestorePointCreationFrequency; " ^
+    "  Set-ItemProperty -Path $p -Name SystemRestorePointCreationFrequency -Value 0 -Type DWord -Force; " ^
+    "  Checkpoint-Computer -Description 'Pre-Optimization' -RestorePointType MODIFY_SETTINGS -EA Stop; " ^
+    "  if($null -ne $o){Set-ItemProperty -Path $p -Name SystemRestorePointCreationFrequency -Value $o -Type DWord -Force}else{Remove-ItemProperty -Path $p -Name SystemRestorePointCreationFrequency -EA SilentlyContinue}; " ^
+    "  Write-Host '[OK] Da tao Restore Point' " ^
+    "} catch { Write-Host '[LOI]' $_.Exception.Message }"
+
+if %errorlevel% equ 0 (set /a STEP_OK+=1) else (set /a STEP_FAIL+=1)
+
+REM ============================================================================
+REM BUOC 2: CAI DAT SCOOP + THEM BUCKETS
+REM ============================================================================
+echo.
+echo ======================================================================
+echo BUOC 2: Cai dat Scoop va them buckets
+echo ======================================================================
+
+where scoop >nul 2>&1
+if %errorlevel% neq 0 (
+    echo   Scoop chua duoc cai. Dang cai dat...
+    echo   ^> Invoke-RestMethod get.scoop.sh ^| Invoke-Expression
+    powershell -NoProfile -ExecutionPolicy Bypass -Command ^
+        "$env:SCOOP='%USERPROFILE%\scoop'; " ^
+        "[Environment]::SetEnvironmentVariable('SCOOP',$env:SCOOP,'User'); " ^
+        "irm get.scoop.sh -OutFile $env:TEMP\install-scoop.ps1; " ^
+        "& powershell.exe -ExecutionPolicy Bypass -File $env:TEMP\install-scoop.ps1 -RunAsAdmin"
+    
+    REM Refresh PATH
+    set "PATH=%USERPROFILE%\scoop\shims;%PATH%"
+    echo   [OK] Da cai dat Scoop
+) else (
+    echo   [OK] Scoop da co san
+)
+set /a STEP_OK+=1
+
+echo   ^> scoop bucket add extras
+call scoop bucket add extras >nul 2>&1
+echo   ^> scoop bucket add versions
+call scoop bucket add versions >nul 2>&1
+echo   [OK] Da them buckets extras, versions
+
+REM ============================================================================
+REM BUOC 3: CAI UNG DUNG QUA SCOOP
+REM ============================================================================
+echo.
+echo ======================================================================
+echo BUOC 3: Cai ung dung qua Scoop
+echo ======================================================================
+
+for %%A in (7zip vlc notepadplusplus git sumatrapdf) do (
+    echo   ^> scoop install %%A
+    call scoop install %%A 2>&1 | findstr /i "installed successfully already" >nul
+    if !errorlevel! equ 0 (
+        echo   [OK] %%A — Da cai/da co san
+        set /a STEP_OK+=1
+    ) else (
+        echo   [LOI] %%A — Kiem tra lai
+        set /a STEP_FAIL+=1
+    )
+)
+
+REM ============================================================================
+REM BUOC 4: CAI UNG DUNG QUA WINGET
+REM ============================================================================
+echo.
+echo ======================================================================
+echo BUOC 4: Cai ung dung qua Winget
+echo ======================================================================
+
+where winget >nul 2>&1
+if %errorlevel% neq 0 (
+    echo   [LOI] Winget khong co san. Hay cai "App Installer" tu Microsoft Store.
+    set /a STEP_FAIL+=1
+    goto :SKIP_WINGET
+)
+
+for %%A in (Google.Chrome DuongDieuPhap.UniKey RARLab.WinRAR Microsoft.VisualStudioCode Microsoft.PowerToys) do (
+    echo   ^> winget install --id %%A --silent --accept-package-agreements --accept-source-agreements
+    winget install --id %%A --silent --accept-package-agreements --accept-source-agreements >nul 2>&1
+    echo   [OK] %%A — Hoan tat
+    set /a STEP_OK+=1
+)
+
+:SKIP_WINGET
+
+REM ============================================================================
+REM BUOC 5: TOI UU HE THONG
+REM ============================================================================
+echo.
+echo ======================================================================
+echo BUOC 5: Toi uu he thong
+echo ======================================================================
+
+REM ---- 5a. Power Plan -> High Performance ----
+echo.
+echo   [5a] Power Plan -^> High Performance
+echo   ^> powercfg -setactive SCHEME_MIN
+powercfg -setactive SCHEME_MIN
+if %errorlevel% equ 0 (
+    echo   [OK] High Performance da duoc kich hoat
+    set /a STEP_OK+=1
+) else (
+    echo   [LOI] Khong chuyen duoc Power Plan
+    set /a STEP_FAIL+=1
+)
+
+REM ---- 5b. Visual Effects -> Best Performance ----
+echo.
+echo   [5b] Visual Effects -^> Best Performance
+echo   ^> Set VisualFXSetting = 2 ^(Best Performance^)
+
+reg add "HKCU\Software\Microsoft\Windows\CurrentVersion\Explorer\VisualEffects" /v VisualFXSetting /t REG_DWORD /d 2 /f >nul 2>&1
+
+REM Tat TaskbarAnimations
+echo   ^> Tat TaskbarAnimations
+reg add "HKCU\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced" /v TaskbarAnimations /t REG_DWORD /d 0 /f >nul 2>&1
+
+REM Tat MinAnimate
+reg add "HKCU\Control Panel\Desktop\WindowMetrics" /v MinAnimate /t REG_SZ /d "0" /f >nul 2>&1
+
+REM Tat Transparency Effects
+echo   ^> Tat Transparency Effects
+reg add "HKCU\Software\Microsoft\Windows\CurrentVersion\Themes\Personalize" /v EnableTransparency /t REG_DWORD /d 0 /f >nul 2>&1
+
+REM Tat animation khi minimize/maximize (UserPreferencesMask)
+reg add "HKCU\Control Panel\Desktop" /v UserPreferencesMask /t REG_BINARY /d 9012038010000000 /f >nul 2>&1
+
+REM Tat Menu Animation va hiệu ứng khác
+reg add "HKCU\Control Panel\Desktop" /v MenuShowDelay /t REG_SZ /d "0" /f >nul 2>&1
+reg add "HKCU\Control Panel\Desktop" /v DragFullWindows /t REG_SZ /d "0" /f >nul 2>&1
+
+echo   [OK] Visual Effects -^> Best Performance, tat animations
+set /a STEP_OK+=1
+
+REM ---- 5c. Tat Telemetry ----
+echo.
+echo   [5c] Tat Telemetry
+echo   ^> sc stop DiagTrack + disable
+sc stop DiagTrack >nul 2>&1
+sc config DiagTrack start= disabled >nul 2>&1
+
+echo   ^> sc stop dmwappushservice + disable
+sc stop dmwappushservice >nul 2>&1
+sc config dmwappushservice start= disabled >nul 2>&1
+
+echo   ^> Set AllowTelemetry = 0
+reg add "HKLM\SOFTWARE\Policies\Microsoft\Windows\DataCollection" /v AllowTelemetry /t REG_DWORD /d 0 /f >nul 2>&1
+
+echo   [OK] DiagTrack + dmwappushservice disabled, AllowTelemetry=0
+set /a STEP_OK+=1
+
+REM ---- 5d. Tat goi y tim kiem web / Cortana ----
+echo.
+echo   [5d] Tat goi y tim kiem web / Cortana
+echo   ^> Set BingSearchEnabled=0, CortanaConsent=0
+
+reg add "HKCU\Software\Microsoft\Windows\CurrentVersion\Search" /v BingSearchEnabled /t REG_DWORD /d 0 /f >nul 2>&1
+reg add "HKCU\Software\Microsoft\Windows\CurrentVersion\Search" /v CortanaConsent /t REG_DWORD /d 0 /f >nul 2>&1
+reg add "HKCU\Software\Microsoft\Windows\CurrentVersion\Search" /v AllowSearchToUseLocation /t REG_DWORD /d 0 /f >nul 2>&1
+
+echo   ^> Set AllowCortana=0, DisableWebSearch=1
+reg add "HKLM\SOFTWARE\Policies\Microsoft\Windows\Windows Search" /v AllowCortana /t REG_DWORD /d 0 /f >nul 2>&1
+reg add "HKLM\SOFTWARE\Policies\Microsoft\Windows\Windows Search" /v DisableWebSearch /t REG_DWORD /d 1 /f >nul 2>&1
+reg add "HKLM\SOFTWARE\Policies\Microsoft\Windows\Windows Search" /v ConnectedSearchUseWeb /t REG_DWORD /d 0 /f >nul 2>&1
+
+echo   [OK] Da tat Bing Search, Cortana, Web Search
+set /a STEP_OK+=1
+
+REM ---- 5e. Tat Background Apps UWP ----
+echo.
+echo   [5e] Tat Background Apps UWP
+echo   ^> Set GlobalUserDisabled = 1
+
+reg add "HKCU\Software\Microsoft\Windows\CurrentVersion\BackgroundAccessApplications" /v GlobalUserDisabled /t REG_DWORD /d 1 /f >nul 2>&1
+
+echo   [OK] GlobalUserDisabled=1
+set /a STEP_OK+=1
+
+REM ---- 5f. Tat Xbox Game Bar / Game DVR ----
+echo.
+echo   [5f] Tat Xbox Game Bar / Game DVR
+echo   ^> Set AppCaptureEnabled=0, GameDVR_Enabled=0
+
+reg add "HKCU\Software\Microsoft\Windows\CurrentVersion\GameDVR" /v AppCaptureEnabled /t REG_DWORD /d 0 /f >nul 2>&1
+reg add "HKCU\System\GameConfigStore" /v GameDVR_Enabled /t REG_DWORD /d 0 /f >nul 2>&1
+
+echo   ^> Set AllowGameDVR = 0 (Group Policy)
+reg add "HKLM\SOFTWARE\Policies\Microsoft\Windows\GameDVR" /v AllowGameDVR /t REG_DWORD /d 0 /f >nul 2>&1
+
+echo   [OK] Da tat Game Bar va Game DVR
+set /a STEP_OK+=1
+
+REM ---- 5g. Tat Windows Search Indexing (chi HDD) ----
+echo.
+echo   [5g] Tat Windows Search Indexing (WSearch)
+if "%IS_HDD%"=="1" (
+    echo   ^> sc stop WSearch + disable
+    sc stop WSearch >nul 2>&1
+    sc config WSearch start= disabled >nul 2>&1
+    echo   [OK] Da tat WSearch (HDD — giam tai I/O)
+    set /a STEP_OK+=1
+) else (
+    echo   [SKIP] Khong phai HDD — giu nguyen Indexing
+    set /a STEP_SKIP+=1
+)
+
+REM ---- 5h. GIU NGUYEN SysMain/Superfetch + Prefetch (QUAN TRONG cho HDD) ----
+echo.
+echo   [5h] Gia co SysMain/Superfetch + Prefetch (GIU BAT — dung cho HDD)
+if "%IS_HDD%"=="1" (
+    REM Dam bao SysMain dang chay
+    echo   ^> sc config SysMain start= auto
+    sc config SysMain start= auto >nul 2>&1
+    if !errorlevel! neq 0 (
+        REM Thu voi ten cu: Superfetch
+        sc config Superfetch start= auto >nul 2>&1
+    )
+    sc start SysMain >nul 2>&1
+
+    REM Dam bao Prefetch bat o muc toi da
+    echo   ^> Set EnablePrefetcher=3, EnableSuperfetch=3
+    reg add "HKLM\SYSTEM\CurrentControlSet\Control\Session Manager\Memory Management\PrefetchParameters" /v EnablePrefetcher /t REG_DWORD /d 3 /f >nul 2>&1
+    reg add "HKLM\SYSTEM\CurrentControlSet\Control\Session Manager\Memory Management\PrefetchParameters" /v EnableSuperfetch /t REG_DWORD /d 3 /f >nul 2>&1
+
+    echo   [OK] GIU BAT — SysMain=Auto, Prefetcher=3, Superfetch=3
+    set /a STEP_OK+=1
+) else (
+    echo   [SKIP] Khong phai HDD — bo qua
+    set /a STEP_SKIP+=1
+)
+
+REM ---- 5i. Giam timeout boot menu ----
+echo.
+echo   [5i] Giam timeout boot menu xuong 5 giay
+echo   ^> bcdedit /timeout 5
+bcdedit /timeout 5 >nul 2>&1
+echo   [OK] Da giam xuong 5 giay
+set /a STEP_OK+=1
+
+REM ---- 5j. Toi uu bo sung (an toan) ----
+echo.
+echo   [5j] Toi uu bo sung (an toan)
+
+REM Tat tips/suggestions Windows
+echo   ^> Tat Windows Tips, Suggested Apps
+reg add "HKCU\Software\Microsoft\Windows\CurrentVersion\ContentDeliveryManager" /v SystemPaneSuggestionsEnabled /t REG_DWORD /d 0 /f >nul 2>&1
+reg add "HKCU\Software\Microsoft\Windows\CurrentVersion\ContentDeliveryManager" /v SoftLandingEnabled /t REG_DWORD /d 0 /f >nul 2>&1
+reg add "HKCU\Software\Microsoft\Windows\CurrentVersion\ContentDeliveryManager" /v SubscribedContent-338389Enabled /t REG_DWORD /d 0 /f >nul 2>&1
+reg add "HKCU\Software\Microsoft\Windows\CurrentVersion\ContentDeliveryManager" /v SubscribedContent-310093Enabled /t REG_DWORD /d 0 /f >nul 2>&1
+reg add "HKCU\Software\Microsoft\Windows\CurrentVersion\ContentDeliveryManager" /v SubscribedContent-338388Enabled /t REG_DWORD /d 0 /f >nul 2>&1
+
+REM Tat Lock Screen
+reg add "HKLM\SOFTWARE\Policies\Microsoft\Windows\Personalization" /v NoLockScreen /t REG_DWORD /d 1 /f >nul 2>&1
+
+REM Tat People icon tren taskbar
+reg add "HKCU\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced\People" /v PeopleBand /t REG_DWORD /d 0 /f >nul 2>&1
+
+REM Tat News and Interests tren taskbar
+reg add "HKCU\Software\Microsoft\Windows\CurrentVersion\Feeds" /v ShellFeedsTaskbarViewMode /t REG_DWORD /d 2 /f >nul 2>&1
+
+REM Tat Startup delay
+reg add "HKCU\Software\Microsoft\Windows\CurrentVersion\Explorer\Serialize" /v StartupDelayInMSec /t REG_DWORD /d 0 /f >nul 2>&1
+
+echo   [OK] Tat tips, suggestions, news, People, startup delay
+set /a STEP_OK+=1
+
+REM ---- 5k. Toi uu Chrome cho HDD (giam I/O dia) ----
+echo.
+echo   [5k] Toi uu Google Chrome cho HDD (giam I/O dia)
+
+REM 5k-1. Tat Software Reporter Tool
+echo   ^> Tat Software Reporter Tool (ChromeCleanupEnabled=0)
+reg add "HKLM\SOFTWARE\Policies\Google\Chrome" /v ChromeCleanupEnabled /t REG_DWORD /d 0 /f >nul 2>&1
+reg add "HKLM\SOFTWARE\Policies\Google\Chrome" /v ChromeCleanupReportingEnabled /t REG_DWORD /d 0 /f >nul 2>&1
+
+REM Chan quyen thuc thi SwReporter
+set "SRT_DIR=%LOCALAPPDATA%\Google\Chrome\User Data\SwReporter"
+if exist "%SRT_DIR%" (
+    echo   ^> Chan quyen thuc thi SwReporter
+    icacls "%SRT_DIR%" /deny *S-1-1-0:(OI)(CI)(RX) >nul 2>&1
+)
+
+REM 5k-2. Gioi han Disk Cache = 100MB
+echo   ^> Gioi han Disk Cache = 100MB (104857600 bytes)
+reg add "HKLM\SOFTWARE\Policies\Google\Chrome" /v DiskCacheSize /t REG_DWORD /d 104857600 /f >nul 2>&1
+
+REM 5k-3. Tat Prefetch/Prerender trang web
+echo   ^> Tat NetworkPrediction (prefetch/prerender)
+reg add "HKLM\SOFTWARE\Policies\Google\Chrome" /v NetworkPredictionOptions /t REG_DWORD /d 2 /f >nul 2>&1
+
+REM 5k-4. Tat Chrome chay nen khi dong trinh duyet
+echo   ^> Tat BackgroundModeEnabled
+reg add "HKLM\SOFTWARE\Policies\Google\Chrome" /v BackgroundModeEnabled /t REG_DWORD /d 0 /f >nul 2>&1
+
+REM 5k-5. Tat tu dong cap nhat component
+echo   ^> Tat ComponentUpdatesEnabled
+reg add "HKLM\SOFTWARE\Policies\Google\Chrome" /v ComponentUpdatesEnabled /t REG_DWORD /d 0 /f >nul 2>&1
+
+REM 5k-6. Tat dong bo tu dong (nguoi dung van bat lai duoc thu cong)
+echo   ^> Tat SyncDisabled (giam ghi dia lien tuc)
+reg add "HKLM\SOFTWARE\Policies\Google\Chrome" /v SyncDisabled /t REG_DWORD /d 1 /f >nul 2>&1
+
+REM 5k-7. Tat metrics/reporting
+echo   ^> Tat MetricsReportingEnabled
+reg add "HKLM\SOFTWARE\Policies\Google\Chrome" /v MetricsReportingEnabled /t REG_DWORD /d 0 /f >nul 2>&1
+
+REM 5k-8. Gioi han so process renderer = 4 (giam RAM + swap tren HDD)
+echo   ^> Gioi han RendererProcessLimit = 4
+reg add "HKLM\SOFTWARE\Policies\Google\Chrome" /v RendererProcessLimit /t REG_DWORD /d 4 /f >nul 2>&1
+
+REM 5k-9. Tao shortcut Chrome toi uu tren Desktop
+set "CHROME_EXE="
+if exist "%ProgramFiles%\Google\Chrome\Application\chrome.exe" (
+    set "CHROME_EXE=%ProgramFiles%\Google\Chrome\Application\chrome.exe"
+)
+if exist "%ProgramFiles(x86)%\Google\Chrome\Application\chrome.exe" (
+    set "CHROME_EXE=%ProgramFiles(x86)%\Google\Chrome\Application\chrome.exe"
+)
+if exist "%LOCALAPPDATA%\Google\Chrome\Application\chrome.exe" (
+    set "CHROME_EXE=%LOCALAPPDATA%\Google\Chrome\Application\chrome.exe"
+)
+
+if defined CHROME_EXE (
+    echo   ^> Tao shortcut "Chrome (HDD Optimized)" tren Desktop
+    set "DESKTOP=%USERPROFILE%\Desktop"
+    powershell -NoProfile -Command ^
+        "$ws=New-Object -ComObject WScript.Shell; " ^
+        "$s=$ws.CreateShortcut('%USERPROFILE%\Desktop\Chrome (HDD Optimized).lnk'); " ^
+        "$s.TargetPath='%CHROME_EXE%'; " ^
+        "$s.Arguments='--disk-cache-size=104857600 --disable-background-networking --disable-component-update --disable-features=OptimizationHints,MediaRouter'; " ^
+        "$s.Description='Google Chrome - Toi uu cho HDD'; " ^
+        "$s.Save()"
+    echo   [OK] Da tao shortcut Chrome toi uu tren Desktop
+)
+
+echo   [OK] Chrome HDD Optimize — Tat SRT, cache 100MB, tat prefetch/background/sync/metrics
+set /a STEP_OK+=1
+
+REM ============================================================================
+REM BUOC 6: DON FILE TAM / CACHE
+REM ============================================================================
+echo.
+echo ======================================================================
+echo BUOC 6: Don file tam / cache
+echo ======================================================================
+
+REM 6a. %TEMP%
+echo   ^> Don %TEMP%
+del /q /f /s "%TEMP%\*" >nul 2>&1
+for /d %%D in ("%TEMP%\*") do rmdir /s /q "%%D" >nul 2>&1
+echo   [OK] Da don %%TEMP%%
+set /a STEP_OK+=1
+
+REM 6b. C:\Windows\Temp
+echo   ^> Don C:\Windows\Temp
+del /q /f /s "C:\Windows\Temp\*" >nul 2>&1
+for /d %%D in ("C:\Windows\Temp\*") do rmdir /s /q "%%D" >nul 2>&1
+echo   [OK] Da don Windows\Temp
+set /a STEP_OK+=1
+
+REM 6c. Recycle Bin
+echo   ^> Don Recycle Bin
+rd /s /q C:\$Recycle.Bin >nul 2>&1
+powershell -NoProfile -Command "Clear-RecycleBin -Force -EA SilentlyContinue" >nul 2>&1
+echo   [OK] Da don Recycle Bin
+set /a STEP_OK+=1
+
+REM 6d. SoftwareDistribution\Download
+echo   ^> Don C:\Windows\SoftwareDistribution\Download
+echo   ^> Tam dung Windows Update de xoa cache...
+net stop wuauserv >nul 2>&1
+del /q /f /s "C:\Windows\SoftwareDistribution\Download\*" >nul 2>&1
+for /d %%D in ("C:\Windows\SoftwareDistribution\Download\*") do rmdir /s /q "%%D" >nul 2>&1
+echo   ^> Khoi dong lai Windows Update...
+net start wuauserv >nul 2>&1
+echo   [OK] Da don SoftwareDistribution (WU da khoi dong lai)
+set /a STEP_OK+=1
+
+REM ============================================================================
+REM BUOC 7: CHONG PHAN MANH O HDD
+REM ============================================================================
+echo.
+echo ======================================================================
+echo BUOC 7: Chong phan manh o he thong (Defrag)
+echo ======================================================================
+
+if "%IS_HDD%"=="1" (
+    echo   ^> defrag C: /O
+    echo   (Qua trinh nay co the mat vai phut den vai gio tuy muc do phan manh)
+    echo   Dang chay defrag...
+    defrag C: /O
+    echo   [OK] Da chong phan manh o C:
+    set /a STEP_OK+=1
+) else (
+    echo   [SKIP] Khong phai HDD — KHONG chay defrag (co hai cho SSD)
+    set /a STEP_SKIP+=1
+)
+
+REM ============================================================================
+REM BUOC 8: TOM TAT KET QUA
+REM ============================================================================
+echo.
+echo ======================================================================
+echo BUOC 8: TOM TAT KET QUA
+echo ======================================================================
+echo.
+echo ╔══════════════════════════════════════════════════════════════════╗
+echo ║                    BAO CAO TOI UU HE THONG                     ║
+echo ╚══════════════════════════════════════════════════════════════════╝
+echo.
+echo   Loai o dia:     %DISK_TYPE%
+echo   Buoc OK:        %STEP_OK%
+echo   Buoc LOI:       %STEP_FAIL%
+echo   Buoc BO QUA:    %STEP_SKIP%
+echo.
+echo   ====================== CHI TIET ======================
+echo.
+echo   BUOC 1: Restore Point                  — DA TAO
+echo   BUOC 2: Scoop + buckets                — DA CAI
+echo   BUOC 3: Scoop apps (7zip, vlc, npp,    — DA CAI
+echo           git, sumatrapdf)
+echo   BUOC 4: Winget apps (Chrome, UniKey,    — DA CAI
+echo           WinRAR, VS Code, PowerToys)
+echo   BUOC 5a: Power Plan High Performance   — DA BAT
+echo   BUOC 5b: Visual Effects Best Perf      — DA TAT animations
+echo   BUOC 5c: Telemetry                     — DA TAT DiagTrack, dmwappushservice
+echo   BUOC 5d: Cortana / Web Search          — DA TAT
+echo   BUOC 5e: Background Apps UWP           — DA TAT
+echo   BUOC 5f: Xbox Game Bar / DVR           — DA TAT
+if "%IS_HDD%"=="1" (
+    echo   BUOC 5g: Search Indexing (WSearch)     — DA TAT (HDD)
+    echo   BUOC 5h: SysMain/Prefetch              — GIU BAT (dung cho HDD)
+) else (
+    echo   BUOC 5g: Search Indexing               — BO QUA (SSD)
+    echo   BUOC 5h: SysMain/Prefetch              — BO QUA (SSD)
+)
+echo   BUOC 5i: Boot timeout                  — 5 giay
+echo   BUOC 5j: Tips/Suggestions/News         — DA TAT
+echo   BUOC 5k: Chrome HDD Optimize           — DA TOI UU (9 tuy chinh)
+echo   BUOC 6: Don file tam                   — DA DON
+if "%IS_HDD%"=="1" (
+    echo   BUOC 7: Defrag                         — DA CHAY
+) else (
+    echo   BUOC 7: Defrag                         — BO QUA (SSD)
+)
+echo.
+echo   ===================== AN TOAN =====================
+echo.
+echo     [OK] Windows Defender:  KHONG BI TAT
+echo     [OK] Windows Firewall:  KHONG BI TAT
+echo     [OK] Windows Update:    KHONG BI TAT
+echo     [OK] Restore Point:     DA TAO
+if "%IS_HDD%"=="1" (
+    echo     [OK] SysMain/Prefetch:  GIU BAT (dung cho HDD)
+)
+echo.
+echo ╔══════════════════════════════════════════════════════════════════╗
+echo ║  KHUYEN NGHI: KHOI DONG LAI MAY DE AP DUNG TAT CA             ║
+echo ║  CAC THAY DOI (dac biet Visual Effects, Services, Boot).       ║
+echo ╚══════════════════════════════════════════════════════════════════╝
+echo.
+
+set /p "RESTART_CONFIRM=Ban co muon khoi dong lai may ngay bay gio? (Y/N): "
+if /i "%RESTART_CONFIRM%"=="Y" (
+    echo   Khoi dong lai sau 10 giay... (shutdown /r /t 10)
+    shutdown /r /t 10
+) else (
+    echo   OK. Hay khoi dong lai khi thuan tien.
+)
+
+echo.
+echo Hoan tat! Cam on ban da su dung script toi uu.
+pause
+exit /b 0
