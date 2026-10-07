@@ -1,787 +1,914 @@
 <#
-╔══════════════════════════════════════════════════════════════════════════════╗
-║  Optimize-Windows10-HDD.ps1                                                ║
-║  Tối ưu Windows 10 cho máy ổ HDD — AN TOÀN, KHÔNG đánh đổi bảo mật       ║
-║                                                                            ║
-║  CÁCH CHẠY:                                                                ║
-║  1. Đổi đuôi file từ .txt sang .ps1                                       ║
-║  2. Click phải → "Run with PowerShell" (hoặc mở PowerShell Admin rồi      ║
-║     chạy: Set-ExecutionPolicy Bypass -Scope Process -Force                 ║
-║     rồi:  .\Optimize-Windows10-HDD.ps1)                                   ║
-║  3. Script YÊU CẦU quyền Administrator                                    ║
-║                                                                            ║
-║  RÀNG BUỘC AN TOÀN:                                                        ║
-║  ✓ KHÔNG tắt Windows Defender, Firewall, Windows Update                    ║
-║  ✓ Tạo System Restore Point trước khi chỉnh registry/service              ║
-║  ✓ Chỉ dọn file tạm/cache, KHÔNG xóa file người dùng                     ║
-║  ✓ Xác minh HDD trước khi áp tối ưu dành cho HDD                         ║
-║  ✓ GIỮ NGUYÊN SysMain/Superfetch + Prefetch (đúng cho HDD)               ║
-╚══════════════════════════════════════════════════════════════════════════════╝
+========================================================================
+  SETUP-PC.PS1  -  Thiet lap may moi (Windows 10 Home)
+========================================================================
+  Huong dan su dung:
+    1. Tai file setup-pc.txt ve (Raw tu GitHub hoac download truc tiep).
+    2. Doi duoi thanh .ps1:
+         Rename-Item .\setup-pc.txt setup-pc.ps1
+    3. Bo chan file tai tu Internet:
+         Unblock-File .\setup-pc.ps1
+    4. Mo PowerShell voi quyen Administrator, chay:
+         powershell -ExecutionPolicy Bypass -File .\setup-pc.ps1
+
+  Yeu cau: Windows 10 Home, PowerShell 5.1, quyen Administrator.
+  Muc dich: May lap trinh Java + van phong.
+  Luu y:
+    - Sau khi bat WSL/VirtualMachinePlatform, can KHOI DONG LAI may.
+    - Can bat Virtualization (VT-x / AMD-V) trong BIOS truoc khi dung Docker.
+========================================================================
 #>
 
-# ============================================================================
-# KIỂM TRA QUYỀN ADMINISTRATOR
-# ============================================================================
+# ============================================================
+# KIEM TRA QUYEN ADMIN - Tu nang cap neu chua co
+# ============================================================
 $currentPrincipal = New-Object Security.Principal.WindowsPrincipal(
     [Security.Principal.WindowsIdentity]::GetCurrent()
 )
 if (-not $currentPrincipal.IsInRole(
     [Security.Principal.WindowsBuiltInRole]::Administrator)) {
-    Write-Host "❌ Script nay yeu cau quyen Administrator!" -ForegroundColor Red
-    Write-Host "   Hay click phai PowerShell -> Run as Administrator" -ForegroundColor Yellow
-    Read-Host "Nhan Enter de thoat"
+    Write-Host "[!] Script can quyen Administrator. Dang tu khoi dong lai..." -ForegroundColor Yellow
+    Start-Process -FilePath "powershell.exe" `
+        -ArgumentList "-ExecutionPolicy Bypass -File `"$PSCommandPath`"" `
+        -Verb RunAs
+    exit
+}
+
+# ============================================================
+# KIEM TRA MOI TRUONG (Windows version, Internet)
+# ============================================================
+$osVersion = [System.Environment]::OSVersion.Version
+$osBuild = $osVersion.Build
+Write-Host "[*] Windows version: $($osVersion.ToString()) (Build $osBuild)" -ForegroundColor Cyan
+
+if ($osBuild -lt 17763) {
+    Write-Host "[X] Can Windows 10 build 17763 (1809) tro len. Thoat." -ForegroundColor Red
+    Read-Host "Nhan Enter de dong"
     exit 1
 }
 
-# Biến theo dõi kết quả
-$script:Results = @()
-$script:Errors  = @()
-
-function Log-Step {
-    param([string]$Step, [string]$Status, [string]$Detail)
-    $entry = [PSCustomObject]@{
-        Buoc      = $Step
-        TrangThai = $Status
-        ChiTiet   = $Detail
-    }
-    $script:Results += $entry
-    $color = if ($Status -eq "OK") { "Green" } 
-             elseif ($Status -eq "SKIP") { "Yellow" } 
-             else { "Red" }
-    Write-Host "[$Status] $Step — $Detail" -ForegroundColor $color
-}
-
-function Log-Error {
-    param([string]$Step, [string]$ErrorMsg)
-    $script:Errors += [PSCustomObject]@{ Buoc = $Step; Loi = $ErrorMsg }
-    Write-Host "[LOI] $Step — $ErrorMsg" -ForegroundColor Red
-}
-
-Write-Host ""
-Write-Host "╔══════════════════════════════════════════════════════════╗" -ForegroundColor Cyan
-Write-Host "║   OPTIMIZE WINDOWS 10 FOR HDD — SAFE MODE              ║" -ForegroundColor Cyan
-Write-Host "╚══════════════════════════════════════════════════════════╝" -ForegroundColor Cyan
-Write-Host ""
-
-# ============================================================================
-# BƯỚC 0: XÁC MINH Ổ ĐĨA HỆ THỐNG LÀ HDD
-# ============================================================================
-Write-Host "=" * 70 -ForegroundColor DarkGray
-Write-Host "BUOC 0: Xac minh o dia he thong" -ForegroundColor Cyan
-Write-Host "=" * 70 -ForegroundColor DarkGray
-
-$diskInfo = Get-PhysicalDisk | Select-Object DeviceId, MediaType, BusType, Size
-$diskInfo | Format-Table -AutoSize
-
-# Tìm ổ chứa C:
-$systemDiskNumber = (Get-Partition -DriveLetter C -ErrorAction SilentlyContinue).DiskNumber
-$systemDisk = Get-PhysicalDisk | Where-Object { $_.DeviceId -eq $systemDiskNumber }
-
-$isHDD = $false
-if ($null -eq $systemDisk) {
-    Write-Host "⚠ Khong xac dinh duoc loai o dia he thong. Gia su la HDD." -ForegroundColor Yellow
-    $isHDD = $true
-} elseif ($systemDisk.MediaType -eq "SSD") {
-    Write-Host "⛔ O dia he thong la SSD!" -ForegroundColor Red
-    Write-Host "   Cac toi uu trong script nay danh cho HDD." -ForegroundColor Red
-    Write-Host "   Toi uu cho SSD nguoc lai hoan toan (bat TRIM, tat defrag, tat Superfetch)." -ForegroundColor Red
-    $confirm = Read-Host "Ban co muon tiep tuc voi cac toi uu CHUNG (bo qua phan rieng HDD)? (Y/N)"
-    if ($confirm -ne "Y" -and $confirm -ne "y") {
-        Write-Host "Da dung lai theo yeu cau." -ForegroundColor Yellow
-        exit 0
-    }
-    $isHDD = $false
-} else {
-    # MediaType = "HDD" hoặc "Unspecified"
-    Write-Host "✓ O dia he thong: $($systemDisk.MediaType) — Tiep tuc toi uu cho HDD" -ForegroundColor Green
-    $isHDD = $true
-}
-
-# ============================================================================
-# BƯỚC 1: TẠO SYSTEM RESTORE POINT
-# ============================================================================
-Write-Host ""
-Write-Host "=" * 70 -ForegroundColor DarkGray
-Write-Host "BUOC 1: Tao System Restore Point" -ForegroundColor Cyan
-Write-Host "=" * 70 -ForegroundColor DarkGray
-
+Write-Host "[*] Kiem tra ket noi Internet..." -ForegroundColor Cyan
 try {
-    # Bật System Restore trên ổ C: nếu chưa bật
-    Enable-ComputerRestore -Drive "C:\" -ErrorAction Stop
-    Write-Host "  > Enable-ComputerRestore -Drive 'C:\'" -ForegroundColor DarkYellow
-
-    # Tạo Restore Point
-    # Lưu ý: Windows giới hạn 1 restore point / 24h nếu đã có, nên dùng 
-    # registry trick để bypass
-    $rpFreqPath = "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion\SystemRestore"
-    $origFreq = (Get-ItemProperty -Path $rpFreqPath -Name "SystemRestorePointCreationFrequency" -ErrorAction SilentlyContinue).SystemRestorePointCreationFrequency
-    Set-ItemProperty -Path $rpFreqPath -Name "SystemRestorePointCreationFrequency" -Value 0 -Type DWord -Force
-
-    Checkpoint-Computer -Description "Pre-Optimization_$(Get-Date -Format 'yyyyMMdd_HHmmss')" -RestorePointType "MODIFY_SETTINGS" -ErrorAction Stop
-    Write-Host "  > Checkpoint-Computer -Description 'Pre-Optimization'" -ForegroundColor DarkYellow
-
-    # Khôi phục giá trị gốc
-    if ($null -ne $origFreq) {
-        Set-ItemProperty -Path $rpFreqPath -Name "SystemRestorePointCreationFrequency" -Value $origFreq -Type DWord -Force
-    } else {
-        Remove-ItemProperty -Path $rpFreqPath -Name "SystemRestorePointCreationFrequency" -ErrorAction SilentlyContinue
-    }
-
-    Log-Step "1. Restore Point" "OK" "Da tao thanh cong"
+    $internetOk = Test-Connection -ComputerName "www.google.com" -Count 1 -Quiet -ErrorAction Stop
+    if (-not $internetOk) { throw "Khong the ket noi" }
+    Write-Host "[OK] Co ket noi Internet." -ForegroundColor Green
 } catch {
-    Log-Error "1. Restore Point" $_.Exception.Message
-    Log-Step "1. Restore Point" "LOI" "Khong tao duoc Restore Point — $($_.Exception.Message)"
-    Write-Host "⚠ Tiep tuc cac buoc con lai..." -ForegroundColor Yellow
+    Write-Host "[X] Khong co ket noi Internet. Mot so buoc se that bai." -ForegroundColor Red
+    Write-Host "    Ban co muon tiep tuc? (Y/N)" -ForegroundColor Yellow
+    $ans = Read-Host
+    if ($ans -ne 'Y' -and $ans -ne 'y') { exit 1 }
 }
 
-# ============================================================================
-# BƯỚC 2: CÀI ĐẶT SCOOP + THÊM BUCKETS
-# ============================================================================
-Write-Host ""
-Write-Host "=" * 70 -ForegroundColor DarkGray
-Write-Host "BUOC 2: Cai dat Scoop va them buckets" -ForegroundColor Cyan
-Write-Host "=" * 70 -ForegroundColor DarkGray
+# ============================================================
+# KHOI TAO TRANSCRIPT (LOG)
+# ============================================================
+$logDir = Join-Path $env:USERPROFILE "setup-logs"
+if (-not (Test-Path $logDir)) { New-Item -Path $logDir -ItemType Directory -Force | Out-Null }
+$logFile = Join-Path $logDir ("setup-pc_{0}.log" -f (Get-Date -Format "yyyyMMdd_HHmmss"))
+Start-Transcript -Path $logFile -Append
+Write-Host "[*] Log file: $logFile" -ForegroundColor Cyan
 
-try {
-    $scoopCmd = Get-Command scoop -ErrorAction SilentlyContinue
-    if ($null -eq $scoopCmd) {
-        Write-Host "  Scoop chua duoc cai. Dang cai dat..." -ForegroundColor Yellow
-        Write-Host "  > Invoke-RestMethod get.scoop.sh | Invoke-Expression" -ForegroundColor DarkYellow
-        
-        # Scoop cần chạy dưới user thường (non-admin). Nếu đang chạy admin, 
-        # cần thêm tham số
-        $env:SCOOP = "$env:USERPROFILE\scoop"
-        [Environment]::SetEnvironmentVariable("SCOOP", $env:SCOOP, "User")
-        
-        Invoke-RestMethod -Uri "https://get.scoop.sh" -OutFile "$env:TEMP\install-scoop.ps1"
-        & powershell.exe -ExecutionPolicy Bypass -File "$env:TEMP\install-scoop.ps1" -RunAsAdmin
-        
-        # Refresh PATH
-        $env:Path = [System.Environment]::GetEnvironmentVariable("Path","Machine") + ";" + [System.Environment]::GetEnvironmentVariable("Path","User")
-        
-        Log-Step "2a. Cai Scoop" "OK" "Da cai dat Scoop"
-    } else {
-        Write-Host "  ✓ Scoop da duoc cai san tai: $($scoopCmd.Source)" -ForegroundColor Green
-        Log-Step "2a. Cai Scoop" "OK" "Da co san"
+# ============================================================
+# BIEN TOAN CUC - THEO DOI KET QUA
+# ============================================================
+$script:results = @{
+    Installed    = [System.Collections.ArrayList]::new()   # Da cai moi
+    AlreadyHave  = [System.Collections.ArrayList]::new()   # Da co san
+    Failed       = [System.Collections.ArrayList]::new()   # That bai
+    ManualNeeded = [System.Collections.ArrayList]::new()   # Can cai thu cong
+}
+$script:totalSteps = 0
+$script:currentStep = 0
+
+# ============================================================
+# DANH SACH UNG DUNG CAN CAI
+# ============================================================
+# Moi app la mot hashtable voi cac key:
+#   Name      : Ten hien thi
+#   WingetId  : ID winget (de trong neu khong biet / can tim)
+#   ChocoId   : ID chocolatey (de trong neu khong biet / can tim)
+#   Search    : $true neu can tim bang winget search / choco search thay vi hard-code ID
+#   PreAction : ScriptBlock chay truoc khi cai (VD: bat WSL cho Docker)
+#   Note      : Ghi chu them
+# ============================================================
+$appList = @(
+    @{
+        Name     = "Git"
+        WingetId = "Git.Git"
+        ChocoId  = "git"
+        Search   = $false
+        Note     = ""
+    },
+    @{
+        Name     = "7-Zip"
+        WingetId = "7zip.7zip"
+        ChocoId  = "7zip"
+        Search   = $false
+        Note     = ""
+    },
+    @{
+        Name     = "Brave Browser"
+        WingetId = "Brave.Brave"
+        ChocoId  = "brave"
+        Search   = $false
+        Note     = ""
+    },
+    @{
+        Name     = "Docker Desktop"
+        WingetId = "Docker.DockerDesktop"
+        ChocoId  = "docker-desktop"
+        Search   = $false
+        Note     = "Yeu cau WSL2 va Virtualization (BIOS). Can khoi dong lai sau khi bat WSL."
+        PreAction = {
+            Enable-WSL2ForDocker
+        }
+    },
+    @{
+        Name     = "EVKey"
+        WingetId = ""
+        ChocoId  = ""
+        Search   = $true
+        Note     = "Bo go tieng Viet - tim tu dong, bo qua neu khong chac chan"
+    },
+    @{
+        Name     = "Antigravity"
+        WingetId = ""
+        ChocoId  = ""
+        Search   = $true
+        Note     = "Tim tu dong, bo qua neu khong chac chan"
     }
+    # === THEM APP MOI O DAY ===
+    # @{
+    #     Name     = "TenApp"
+    #     WingetId = "Publisher.AppName"
+    #     ChocoId  = "app-name"
+    #     Search   = $false
+    #     Note     = ""
+    # },
+)
 
-    # Thêm bucket extras và versions
-    Write-Host "  > scoop bucket add extras" -ForegroundColor DarkYellow
-    & scoop bucket add extras 2>&1 | Out-Null
-    Write-Host "  > scoop bucket add versions" -ForegroundColor DarkYellow
-    & scoop bucket add versions 2>&1 | Out-Null
-    
-    Log-Step "2b. Them buckets" "OK" "Da them extras, versions"
-} catch {
-    Log-Error "2. Scoop" $_.Exception.Message
-    Log-Step "2. Scoop" "LOI" $_.Exception.Message
+# ============================================================
+# DANH SACH BLOATWARE AN TOAN DE GO
+# ============================================================
+# Chi go cac app nay - KHONG go Microsoft Store, Calculator, Photos
+$bloatwareList = @(
+    "Microsoft.BingNews"
+    "Microsoft.BingWeather"
+    "Microsoft.GetHelp"
+    "Microsoft.Getstarted"
+    "Microsoft.MicrosoftSolitaireCollection"
+    "Microsoft.MixedReality.Portal"
+    "Microsoft.People"
+    "Microsoft.SkypeApp"
+    "Microsoft.WindowsFeedbackHub"
+    "Microsoft.WindowsMaps"
+    "Microsoft.YourPhone"
+    "Microsoft.ZuneMusic"
+    "Microsoft.ZuneVideo"
+    "king.com.CandyCrushSaga"
+    "king.com.CandyCrushSodaSaga"
+    "Microsoft.549981C3F5F10"           # Cortana
+    "Microsoft.Advertising.Xaml"
+    "Microsoft.WindowsCommunicationsApps"
+    "Microsoft.Office.Sway"
+    "Microsoft.OneConnect"
+    "Microsoft.MicrosoftOfficeHub"
+)
+
+# ============================================================
+# HAM TIEN ICH
+# ============================================================
+
+function Write-Step {
+    <# In tien trinh buoc hien tai #>
+    param(
+        [string]$Message,
+        [string]$Status = "INFO"   # INFO, OK, SKIP, FAIL
+    )
+    $script:currentStep++
+    $prefix = "[Buoc $($script:currentStep)/$($script:totalSteps)]"
+    switch ($Status) {
+        "OK"   { Write-Host "$prefix [OK]   $Message" -ForegroundColor Green }
+        "SKIP" { Write-Host "$prefix [SKIP] $Message" -ForegroundColor Yellow }
+        "FAIL" { Write-Host "$prefix [FAIL] $Message" -ForegroundColor Red }
+        default { Write-Host "$prefix [....] $Message" -ForegroundColor Cyan }
+    }
 }
 
-# ============================================================================
-# BƯỚC 3: CÀI ỨNG DỤNG QUA SCOOP
-# ============================================================================
-Write-Host ""
-Write-Host "=" * 70 -ForegroundColor DarkGray
-Write-Host "BUOC 3: Cai ung dung qua Scoop" -ForegroundColor Cyan
-Write-Host "=" * 70 -ForegroundColor DarkGray
+function Test-CommandExists {
+    <# Kiem tra mot lenh co ton tai trong PATH khong #>
+    param([string]$Command)
+    $null -ne (Get-Command $Command -ErrorAction SilentlyContinue)
+}
 
-$scoopApps = @("7zip", "vlc", "notepadplusplus", "git", "sumatrapdf")
+function Test-AppInstalledWinget {
+    <# Kiem tra app da cai qua winget chua (theo ID) #>
+    param([string]$WingetId)
+    if (-not (Test-CommandExists "winget")) { return $false }
+    $listOutput = winget list --id $WingetId --accept-source-agreements 2>$null
+    # winget list tra ve bang co chua ID neu da cai
+    return ($listOutput | Out-String) -match [regex]::Escape($WingetId)
+}
 
-foreach ($app in $scoopApps) {
+function Test-AppInstalledChoco {
+    <# Kiem tra app da cai qua Chocolatey chua #>
+    param([string]$ChocoId)
+    if (-not (Test-CommandExists "choco")) { return $false }
+    $listOutput = choco list --local-only --exact $ChocoId 2>$null
+    return ($listOutput | Out-String) -match $ChocoId
+}
+
+function Install-WithWinget {
+    <# Cai app bang winget, tra ve $true neu thanh cong #>
+    param([string]$WingetId)
+    if (-not (Test-CommandExists "winget")) { return $false }
     try {
-        Write-Host "  > scoop install $app" -ForegroundColor DarkYellow
-        $output = & scoop install $app 2>&1
-        $outputStr = $output -join "`n"
-        
-        if ($outputStr -match "already installed" -or $outputStr -match "was installed successfully") {
-            Log-Step "3. Scoop: $app" "OK" "Da cai/da co san"
-        } else {
-            # Kiểm tra xem có lỗi không
-            if ($LASTEXITCODE -ne 0 -and $null -ne $LASTEXITCODE) {
-                Log-Step "3. Scoop: $app" "LOI" "Exit code: $LASTEXITCODE"
-            } else {
-                Log-Step "3. Scoop: $app" "OK" "Da cai dat"
+        $proc = Start-Process -FilePath "winget" `
+            -ArgumentList "install --id $WingetId --accept-package-agreements --accept-source-agreements --silent" `
+            -Wait -PassThru -NoNewWindow
+        return ($proc.ExitCode -eq 0)
+    } catch {
+        Write-Host "    Winget install loi: $_" -ForegroundColor Red
+        return $false
+    }
+}
+
+function Install-WithChoco {
+    <# Cai app bang Chocolatey, tra ve $true neu thanh cong #>
+    param([string]$ChocoId)
+    if (-not (Test-CommandExists "choco")) { return $false }
+    try {
+        $proc = Start-Process -FilePath "choco" `
+            -ArgumentList "install $ChocoId -y --no-progress" `
+            -Wait -PassThru -NoNewWindow
+        return ($proc.ExitCode -eq 0)
+    } catch {
+        Write-Host "    Choco install loi: $_" -ForegroundColor Red
+        return $false
+    }
+}
+
+function Search-PackageWinget {
+    <# Tim app tren winget, tra ve ID neu tim thay ket qua khop chinh xac #>
+    param([string]$AppName)
+    if (-not (Test-CommandExists "winget")) { return $null }
+    try {
+        $searchOutput = winget search --name $AppName --accept-source-agreements 2>$null
+        $outputStr = $searchOutput | Out-String
+        # Tim dong co chua ten app (khop chinh xac - ten bat dau dong)
+        $lines = $outputStr -split "`n" | Where-Object { $_.Trim() -ne "" }
+        # Bo qua header (2 dong dau), tim dong co ten khop chinh xac
+        foreach ($line in $lines) {
+            # Winget output co dang: Name   Id   Version   Source
+            # Kiem tra ten khop chinh xac (case-insensitive)
+            if ($line -match "^\s*$([regex]::Escape($AppName))\s+(\S+)\s+" ) {
+                $foundId = $Matches[1]
+                Write-Host "    Winget search tim thay: $foundId" -ForegroundColor Gray
+                return $foundId
             }
         }
+        return $null
     } catch {
-        Log-Error "3. Scoop: $app" $_.Exception.Message
-        Log-Step "3. Scoop: $app" "LOI" $_.Exception.Message
+        return $null
     }
 }
 
-# ============================================================================
-# BƯỚC 4: CÀI ỨNG DỤNG QUA WINGET
-# ============================================================================
-Write-Host ""
-Write-Host "=" * 70 -ForegroundColor DarkGray
-Write-Host "BUOC 4: Cai ung dung qua Winget" -ForegroundColor Cyan
-Write-Host "=" * 70 -ForegroundColor DarkGray
+function Search-PackageChoco {
+    <# Tim app tren Chocolatey, tra ve ID neu tim thay ket qua khop chinh xac #>
+    param([string]$AppName)
+    if (-not (Test-CommandExists "choco")) { return $null }
+    try {
+        $searchOutput = choco search $AppName --exact 2>$null
+        $outputStr = $searchOutput | Out-String
+        # Choco search --exact tra ve: "appname 1.2.3 [Approved]"
+        $lines = $outputStr -split "`n" | Where-Object { $_.Trim() -ne "" }
+        foreach ($line in $lines) {
+            if ($line -match "^($([regex]::Escape($AppName)))\s+[\d]") {
+                $foundId = $Matches[1]
+                Write-Host "    Choco search tim thay: $foundId" -ForegroundColor Gray
+                return $foundId
+            }
+        }
+        return $null
+    } catch {
+        return $null
+    }
+}
 
-$wingetCmd = Get-Command winget -ErrorAction SilentlyContinue
-if ($null -eq $wingetCmd) {
-    Log-Error "4. Winget" "Winget khong duoc cai dat. Can Windows 10 1809+ va App Installer tu Microsoft Store."
-    Log-Step "4. Winget" "LOI" "Winget khong co san. Hay cai 'App Installer' tu Microsoft Store."
-} else {
-    $wingetApps = @(
-        "Google.Chrome",
-        "Microsoft.VisualStudioCode",
-        "Microsoft.PowerToys",
-        "DuongDieuPhap.UniKey",
-        "RARLab.WinRAR"
-    )
+# ============================================================
+# PHAN 1: CHUAN BI CONG CU CAI DAT
+# ============================================================
 
-    foreach ($app in $wingetApps) {
+function Initialize-PackageManagers {
+    <# Kiem tra va cai dat winget + Chocolatey #>
+
+    # --- Kiem tra winget ---
+    Write-Step "Kiem tra winget..." "INFO"
+    if (Test-CommandExists "winget") {
+        Write-Host "    winget da co san." -ForegroundColor Green
+    } else {
+        Write-Host "    [!] winget KHONG co. Ban can cai 'App Installer' tu Microsoft Store." -ForegroundColor Yellow
+        Write-Host "    Mo Microsoft Store > Tim 'App Installer' > Cai dat." -ForegroundColor Yellow
+        Write-Host "    Hoac chay: Add-AppxPackage -Path <duong-dan-msixbundle>" -ForegroundColor Yellow
+        $null = $script:results.ManualNeeded.Add("winget (App Installer) - can cai tu Microsoft Store")
+    }
+
+    # --- Cai Chocolatey ---
+    Write-Step "Kiem tra / Cai dat Chocolatey..." "INFO"
+    if (Test-CommandExists "choco") {
+        Write-Host "    Chocolatey da co san." -ForegroundColor Green
+    } else {
+        Write-Host "    Dang cai Chocolatey..." -ForegroundColor Cyan
         try {
-            Write-Host "  > winget install --id $app --silent --accept-package-agreements --accept-source-agreements" -ForegroundColor DarkYellow
-            $output = & winget install --id $app --silent --accept-package-agreements --accept-source-agreements 2>&1
-            $outputStr = $output -join "`n"
-            
-            if ($outputStr -match "already installed" -or $outputStr -match "Successfully installed") {
-                Log-Step "4. Winget: $app" "OK" "Da cai/da co san"
-            } elseif ($outputStr -match "No applicable update found" -or $outputStr -match "No newer package") {
-                Log-Step "4. Winget: $app" "OK" "Da co phien ban moi nhat"
+            # Chi dat ExecutionPolicy trong scope Process (an toan)
+            Set-ExecutionPolicy Bypass -Scope Process -Force
+            [System.Net.ServicePointManager]::SecurityProtocol = `
+                [System.Net.ServicePointManager]::SecurityProtocol -bor 3072
+            $installScript = (New-Object System.Net.WebClient).DownloadString(
+                'https://community.chocolatey.org/install.ps1'
+            )
+            Invoke-Expression $installScript
+            # Lam moi PATH de nhan dien choco
+            $env:Path = [System.Environment]::GetEnvironmentVariable("Path", "Machine") + ";" + `
+                        [System.Environment]::GetEnvironmentVariable("Path", "User")
+            if (Test-CommandExists "choco") {
+                Write-Host "    Chocolatey cai thanh cong." -ForegroundColor Green
             } else {
-                Log-Step "4. Winget: $app" "OK" "Hoan tat"
+                throw "Khong tim thay choco sau khi cai"
             }
         } catch {
-            Log-Error "4. Winget: $app" $_.Exception.Message
-            Log-Step "4. Winget: $app" "LOI" $_.Exception.Message
+            Write-Host "    Cai Chocolatey that bai: $_" -ForegroundColor Red
+            $null = $script:results.Failed.Add("Chocolatey")
         }
     }
 }
 
-# ============================================================================
-# BƯỚC 5: TỐI ƯU HỆ THỐNG
-# ============================================================================
-Write-Host ""
-Write-Host "=" * 70 -ForegroundColor DarkGray
-Write-Host "BUOC 5: Toi uu he thong" -ForegroundColor Cyan
-Write-Host "=" * 70 -ForegroundColor DarkGray
+# ============================================================
+# PHAN 1.5: BAT WSL2 CHO DOCKER (PreAction)
+# ============================================================
 
-# ---- 5a. Power Plan → High Performance ----
-Write-Host ""
-Write-Host "  [5a] Power Plan -> High Performance" -ForegroundColor White
-try {
-    Write-Host "  > powercfg -setactive SCHEME_MIN" -ForegroundColor DarkYellow
-    powercfg -setactive SCHEME_MIN
-    $activePlan = powercfg -getactivescheme
-    Log-Step "5a. Power Plan" "OK" "High Performance — $activePlan"
-} catch {
-    Log-Error "5a. Power Plan" $_.Exception.Message
-    Log-Step "5a. Power Plan" "LOI" $_.Exception.Message
-}
+function Enable-WSL2ForDocker {
+    <#
+    Bat WSL va VirtualMachinePlatform cho Docker Desktop tren Win10 Home.
+    Yeu cau build >= 19041.
+    HOAN TAC: Disable-WindowsOptionalFeature -Online -FeatureName Microsoft-Windows-Subsystem-Linux
+              Disable-WindowsOptionalFeature -Online -FeatureName VirtualMachinePlatform
+    #>
+    Write-Host "    [Docker Pre] Kiem tra yeu cau WSL2..." -ForegroundColor Cyan
 
-# ---- 5b. Visual Effects → Best Performance ----
-Write-Host ""
-Write-Host "  [5b] Visual Effects -> Best Performance" -ForegroundColor White
-try {
-    $vfxPath = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\VisualEffects"
-    if (-not (Test-Path $vfxPath)) { New-Item -Path $vfxPath -Force | Out-Null }
-    
-    Write-Host "  > Set VisualFXSetting = 2 (Best Performance)" -ForegroundColor DarkYellow
-    Set-ItemProperty -Path $vfxPath -Name "VisualFXSetting" -Value 2 -Type DWord -Force
-
-    # Tắt animation cụ thể
-    $dwmPath = "HKCU:\Software\Microsoft\Windows\DWM"
-    $explorerAdvPath = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced"
-    
-    # Tắt animation taskbar
-    Write-Host "  > Tat TaskbarAnimations" -ForegroundColor DarkYellow
-    Set-ItemProperty -Path $explorerAdvPath -Name "TaskbarAnimations" -Value 0 -Type DWord -Force
-    
-    # Tắt animation khi minimize/maximize window
-    $userPrefMask = [byte[]](0x90,0x12,0x03,0x80,0x10,0x00,0x00,0x00)
-    Set-ItemProperty -Path "HKCU:\Control Panel\Desktop" -Name "UserPreferencesMask" -Value $userPrefMask -Type Binary -Force
-    
-    # Tắt hiệu ứng transparency
-    Write-Host "  > Tat Transparency Effects" -ForegroundColor DarkYellow
-    Set-ItemProperty -Path "HKCU:\Software\Microsoft\Windows\CurrentVersion\Themes\Personalize" -Name "EnableTransparency" -Value 0 -Type DWord -Force
-    
-    # Tắt smooth scrolling
-    Set-ItemProperty -Path "HKCU:\Control Panel\Desktop" -Name "SmoothScroll" -Value 0 -Type DWord -Force -ErrorAction SilentlyContinue
-    
-    # Tắt animation window
-    $sysMetricsPath = "HKCU:\Control Panel\Desktop\WindowMetrics"
-    Set-ItemProperty -Path $sysMetricsPath -Name "MinAnimate" -Value "0" -Type String -Force
-
-    Log-Step "5b. Visual Effects" "OK" "Da chuyen sang Best Performance, tat animations"
-} catch {
-    Log-Error "5b. Visual Effects" $_.Exception.Message
-    Log-Step "5b. Visual Effects" "LOI" $_.Exception.Message
-}
-
-# ---- 5c. Tắt Telemetry ----
-Write-Host ""
-Write-Host "  [5c] Tat Telemetry" -ForegroundColor White
-try {
-    # Disable DiagTrack service
-    Write-Host "  > Stop-Service DiagTrack; Set-Service DiagTrack -StartupType Disabled" -ForegroundColor DarkYellow
-    Stop-Service "DiagTrack" -Force -ErrorAction SilentlyContinue
-    Set-Service "DiagTrack" -StartupType Disabled -ErrorAction Stop
-
-    # Disable dmwappushservice
-    Write-Host "  > Stop-Service dmwappushservice; Set-Service dmwappushservice -StartupType Disabled" -ForegroundColor DarkYellow
-    Stop-Service "dmwappushservice" -Force -ErrorAction SilentlyContinue
-    Set-Service "dmwappushservice" -StartupType Disabled -ErrorAction Stop
-
-    # Set AllowTelemetry = 0
-    $telemetryPath = "HKLM:\SOFTWARE\Policies\Microsoft\Windows\DataCollection"
-    if (-not (Test-Path $telemetryPath)) { New-Item -Path $telemetryPath -Force | Out-Null }
-    Write-Host "  > Set AllowTelemetry = 0" -ForegroundColor DarkYellow
-    Set-ItemProperty -Path $telemetryPath -Name "AllowTelemetry" -Value 0 -Type DWord -Force
-
-    Log-Step "5c. Telemetry" "OK" "DiagTrack + dmwappushservice disabled, AllowTelemetry=0"
-} catch {
-    Log-Error "5c. Telemetry" $_.Exception.Message
-    Log-Step "5c. Telemetry" "LOI" $_.Exception.Message
-}
-
-# ---- 5d. Tắt gợi ý tìm kiếm web / Cortana ----
-Write-Host ""
-Write-Host "  [5d] Tat goi y tim kiem web / Cortana" -ForegroundColor White
-try {
-    # Tắt web search trong Start Menu
-    $searchPath = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Search"
-    if (-not (Test-Path $searchPath)) { New-Item -Path $searchPath -Force | Out-Null }
-    
-    Write-Host "  > Set BingSearchEnabled = 0, CortanaConsent = 0" -ForegroundColor DarkYellow
-    Set-ItemProperty -Path $searchPath -Name "BingSearchEnabled" -Value 0 -Type DWord -Force
-    Set-ItemProperty -Path $searchPath -Name "CortanaConsent" -Value 0 -Type DWord -Force
-    Set-ItemProperty -Path $searchPath -Name "AllowSearchToUseLocation" -Value 0 -Type DWord -Force
-
-    # Tắt Cortana qua Group Policy
-    $cortanaPolicy = "HKLM:\SOFTWARE\Policies\Microsoft\Windows\Windows Search"
-    if (-not (Test-Path $cortanaPolicy)) { New-Item -Path $cortanaPolicy -Force | Out-Null }
-    Write-Host "  > Set AllowCortana = 0, DisableWebSearch = 1, ConnectedSearchUseWeb = 0" -ForegroundColor DarkYellow
-    Set-ItemProperty -Path $cortanaPolicy -Name "AllowCortana" -Value 0 -Type DWord -Force
-    Set-ItemProperty -Path $cortanaPolicy -Name "DisableWebSearch" -Value 1 -Type DWord -Force
-    Set-ItemProperty -Path $cortanaPolicy -Name "ConnectedSearchUseWeb" -Value 0 -Type DWord -Force
-
-    Log-Step "5d. Web Search/Cortana" "OK" "Da tat Bing Search, Cortana, Web Search"
-} catch {
-    Log-Error "5d. Web Search/Cortana" $_.Exception.Message
-    Log-Step "5d. Web Search/Cortana" "LOI" $_.Exception.Message
-}
-
-# ---- 5e. Tắt Background Apps UWP ----
-Write-Host ""
-Write-Host "  [5e] Tat Background Apps UWP" -ForegroundColor White
-try {
-    $bgAppsPath = "HKCU:\Software\Microsoft\Windows\CurrentVersion\BackgroundAccessApplications"
-    if (-not (Test-Path $bgAppsPath)) { New-Item -Path $bgAppsPath -Force | Out-Null }
-    
-    Write-Host "  > Set GlobalUserDisabled = 1" -ForegroundColor DarkYellow
-    Set-ItemProperty -Path $bgAppsPath -Name "GlobalUserDisabled" -Value 1 -Type DWord -Force
-
-    Log-Step "5e. Background Apps" "OK" "GlobalUserDisabled=1"
-} catch {
-    Log-Error "5e. Background Apps" $_.Exception.Message
-    Log-Step "5e. Background Apps" "LOI" $_.Exception.Message
-}
-
-# ---- 5f. Tắt Xbox Game Bar / Game DVR ----
-Write-Host ""
-Write-Host "  [5f] Tat Xbox Game Bar / Game DVR" -ForegroundColor White
-try {
-    # Tắt Game Bar
-    $gameBarPath = "HKCU:\Software\Microsoft\Windows\CurrentVersion\GameDVR"
-    if (-not (Test-Path $gameBarPath)) { New-Item -Path $gameBarPath -Force | Out-Null }
-    Write-Host "  > Set AppCaptureEnabled = 0" -ForegroundColor DarkYellow
-    Set-ItemProperty -Path $gameBarPath -Name "AppCaptureEnabled" -Value 0 -Type DWord -Force
-
-    $gameCfgPath = "HKCU:\System\GameConfigStore"
-    if (-not (Test-Path $gameCfgPath)) { New-Item -Path $gameCfgPath -Force | Out-Null }
-    Write-Host "  > Set GameDVR_Enabled = 0" -ForegroundColor DarkYellow
-    Set-ItemProperty -Path $gameCfgPath -Name "GameDVR_Enabled" -Value 0 -Type DWord -Force
-
-    # Tắt qua Group Policy
-    $gameBarPolicy = "HKLM:\SOFTWARE\Policies\Microsoft\Windows\GameDVR"
-    if (-not (Test-Path $gameBarPolicy)) { New-Item -Path $gameBarPolicy -Force | Out-Null }
-    Write-Host "  > Set AllowGameDVR = 0" -ForegroundColor DarkYellow
-    Set-ItemProperty -Path $gameBarPolicy -Name "AllowGameDVR" -Value 0 -Type DWord -Force
-
-    # Tắt Game Bar chính
-    $gameBarReg = "HKLM:\SOFTWARE\Microsoft\PolicyManager\default\ApplicationManagement\AllowGameDVR"
-    if (Test-Path $gameBarReg) {
-        Set-ItemProperty -Path $gameBarReg -Name "value" -Value 0 -Type DWord -Force -ErrorAction SilentlyContinue
+    if ($osBuild -lt 19041) {
+        Write-Host "    [!] Build Windows ($osBuild) < 19041. Khong the bat WSL2." -ForegroundColor Red
+        throw "Windows build qua cu cho WSL2"
     }
 
-    Log-Step "5f. Xbox Game Bar/DVR" "OK" "Da tat Game Bar va Game DVR"
-} catch {
-    Log-Error "5f. Xbox Game Bar/DVR" $_.Exception.Message
-    Log-Step "5f. Xbox Game Bar/DVR" "LOI" $_.Exception.Message
+    # Bat Microsoft-Windows-Subsystem-Linux
+    $wslFeature = Get-WindowsOptionalFeature -Online -FeatureName Microsoft-Windows-Subsystem-Linux
+    if ($wslFeature.State -ne "Enabled") {
+        Write-Host "    Dang bat Windows Subsystem for Linux..." -ForegroundColor Cyan
+        Enable-WindowsOptionalFeature -Online -FeatureName Microsoft-Windows-Subsystem-Linux -All -NoRestart | Out-Null
+        $script:needReboot = $true
+    } else {
+        Write-Host "    WSL da duoc bat." -ForegroundColor Green
+    }
+
+    # Bat VirtualMachinePlatform
+    $vmpFeature = Get-WindowsOptionalFeature -Online -FeatureName VirtualMachinePlatform
+    if ($vmpFeature.State -ne "Enabled") {
+        Write-Host "    Dang bat Virtual Machine Platform..." -ForegroundColor Cyan
+        Enable-WindowsOptionalFeature -Online -FeatureName VirtualMachinePlatform -All -NoRestart | Out-Null
+        $script:needReboot = $true
+    } else {
+        Write-Host "    VirtualMachinePlatform da duoc bat." -ForegroundColor Green
+    }
+
+    # Dat WSL default version = 2
+    if (Test-CommandExists "wsl") {
+        wsl --set-default-version 2 2>$null
+        Write-Host "    WSL default version dat thanh 2." -ForegroundColor Green
+    }
+
+    # Canh bao
+    Write-Host "" -ForegroundColor Yellow
+    Write-Host "    ============================================================" -ForegroundColor Yellow
+    Write-Host "    CANH BAO QUAN TRONG:" -ForegroundColor Yellow
+    Write-Host "    1. Ban CAN bat Virtualization (VT-x / AMD-V) trong BIOS." -ForegroundColor Yellow
+    Write-Host "    2. Sau khi script chay xong, CAN KHOI DONG LAI may" -ForegroundColor Yellow
+    Write-Host "       de WSL2 hoat dong day du." -ForegroundColor Yellow
+    Write-Host "    ============================================================" -ForegroundColor Yellow
+    Write-Host ""
 }
 
-# ---- 5g. Tắt Windows Search Indexing (chỉ HDD) ----
-Write-Host ""
-Write-Host "  [5g] Tat Windows Search Indexing (WSearch)" -ForegroundColor White
-if ($isHDD) {
+# ============================================================
+# PHAN 2: CAI UNG DUNG
+# ============================================================
+
+function Install-Applications {
+    <# Cai tat ca app trong $appList #>
+    foreach ($app in $appList) {
+        $name = $app.Name
+        Write-Step "Xu ly: $name" "INFO"
+
+        try {
+            # --- Truong hop can tim kiem (Search = $true) ---
+            if ($app.Search -eq $true) {
+                Write-Host "    Tim kiem '$name' tren winget va choco..." -ForegroundColor Cyan
+
+                $wingetId = Search-PackageWinget -AppName $name
+                $chocoId  = Search-PackageChoco -AppName $name
+
+                if ($wingetId) {
+                    $app.WingetId = $wingetId
+                } elseif ($chocoId) {
+                    $app.ChocoId = $chocoId
+                } else {
+                    Write-Host "    Khong tim thay goi chinh xac cho '$name'. Bo qua." -ForegroundColor Yellow
+                    $null = $script:results.ManualNeeded.Add("$name - Khong tim thay tren winget/choco")
+                    continue
+                }
+            }
+
+            # --- Kiem tra da cai chua (idempotent) ---
+            $alreadyInstalled = $false
+            if ($app.WingetId -and (Test-AppInstalledWinget -WingetId $app.WingetId)) {
+                $alreadyInstalled = $true
+            }
+            if (-not $alreadyInstalled -and $app.ChocoId -and (Test-AppInstalledChoco -ChocoId $app.ChocoId)) {
+                $alreadyInstalled = $true
+            }
+
+            if ($alreadyInstalled) {
+                Write-Step "$name - Da co san, bo qua." "SKIP"
+                $null = $script:results.AlreadyHave.Add($name)
+                continue
+            }
+
+            # --- Chay PreAction neu co (VD: bat WSL cho Docker) ---
+            if ($app.PreAction) {
+                Write-Host "    Chay PreAction cho $name..." -ForegroundColor Cyan
+                & $app.PreAction
+            }
+
+            # --- Thu cai bang winget truoc ---
+            $installed = $false
+            if ($app.WingetId) {
+                Write-Host "    Thu cai $name bang winget ($($app.WingetId))..." -ForegroundColor Cyan
+                $installed = Install-WithWinget -WingetId $app.WingetId
+            }
+
+            # --- Fallback sang Chocolatey ---
+            if (-not $installed -and $app.ChocoId) {
+                Write-Host "    Winget that bai/khong co. Thu Chocolatey ($($app.ChocoId))..." -ForegroundColor Yellow
+                $installed = Install-WithChoco -ChocoId $app.ChocoId
+            }
+
+            if ($installed) {
+                Write-Step "$name - Cai thanh cong!" "OK"
+                $null = $script:results.Installed.Add($name)
+            } else {
+                Write-Step "$name - THAT BAI ca winget lan choco." "FAIL"
+                $null = $script:results.Failed.Add($name)
+            }
+
+            # Hien ghi chu neu co
+            if ($app.Note) {
+                Write-Host "    Ghi chu: $($app.Note)" -ForegroundColor Gray
+            }
+
+        } catch {
+            Write-Step "$name - LOI: $_" "FAIL"
+            $null = $script:results.Failed.Add("$name (Loi: $_)")
+        }
+    }
+}
+
+# ============================================================
+# PHAN 3: TINH CHINH WINDOWS
+# ============================================================
+
+function Remove-Bloatware {
+    <#
+    Go cac app bloatware pho bien cua Win10.
+    Chi go tu danh sach an toan, KHONG go Store, Calculator, Photos.
+    HOAN TAC: Cai lai tu Microsoft Store.
+    #>
+    Write-Step "Go bloatware Win10..." "INFO"
+    foreach ($appName in $bloatwareList) {
+        try {
+            $pkg = Get-AppxPackage -Name $appName -ErrorAction SilentlyContinue
+            if ($pkg) {
+                $pkg | Remove-AppxPackage -ErrorAction Stop
+                Write-Host "    Da go: $appName" -ForegroundColor Green
+            }
+            # Cung go khoi provisioned (khong cai lai cho user moi)
+            $provPkg = Get-AppxProvisionedPackage -Online -ErrorAction SilentlyContinue |
+                       Where-Object { $_.PackageName -like "*$appName*" }
+            if ($provPkg) {
+                $provPkg | Remove-AppxProvisionedPackage -Online -ErrorAction SilentlyContinue | Out-Null
+            }
+        } catch {
+            Write-Host "    Khong go duoc $appName : $_" -ForegroundColor Yellow
+        }
+    }
+    Write-Host "    Hoan tat go bloatware." -ForegroundColor Green
+}
+
+function Set-TelemetryAndPrivacy {
+    <#
+    Giam telemetry va tat quang cao bang Registry.
+    HOAN TAC cho tung key:
+      - AllowTelemetry: dat lai ve 3 (Full)
+      - AdvertisingInfo: dat Enabled ve 1
+      - ContentDeliveryManager: dat cac gia tri ve 1
+      - CloudContent: xoa key DisableWindowsConsumerFeatures
+    #>
+    Write-Step "Giam telemetry va tat quang cao..." "INFO"
+
     try {
-        Write-Host "  > Stop-Service WSearch; Set-Service WSearch -StartupType Disabled" -ForegroundColor DarkYellow
-        Stop-Service "WSearch" -Force -ErrorAction SilentlyContinue
-        Set-Service "WSearch" -StartupType Disabled -ErrorAction Stop
-        Log-Step "5g. Search Indexing" "OK" "Da tat WSearch (HDD — giam tai I/O)"
+        # --- Giam Telemetry xuong muc thap nhat co the tren Home (1 = Basic) ---
+        # HOAN TAC: Set-ItemProperty -Path $telPath -Name "AllowTelemetry" -Value 3
+        $telPath = "HKLM:\SOFTWARE\Policies\Microsoft\Windows\DataCollection"
+        if (-not (Test-Path $telPath)) { New-Item -Path $telPath -Force | Out-Null }
+        Set-ItemProperty -Path $telPath -Name "AllowTelemetry" -Value 1 -Type DWord -Force
+        Write-Host "    AllowTelemetry = 1 (Basic)." -ForegroundColor Green
+
+        # --- Tat Advertising ID ---
+        # HOAN TAC: Set-ItemProperty -Path $adIdPath -Name "Enabled" -Value 1
+        $adIdPath = "HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\AdvertisingInfo"
+        if (-not (Test-Path $adIdPath)) { New-Item -Path $adIdPath -Force | Out-Null }
+        Set-ItemProperty -Path $adIdPath -Name "Enabled" -Value 0 -Type DWord -Force
+        Write-Host "    Advertising ID = tat." -ForegroundColor Green
+
+        # --- Tat goi y ung dung (quang cao trong Start Menu) ---
+        # HOAN TAC: Dat cac gia tri sau ve 1
+        $cdmPath = "HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\ContentDeliveryManager"
+        if (Test-Path $cdmPath) {
+            Set-ItemProperty -Path $cdmPath -Name "SystemPaneSuggestionsEnabled" -Value 0 -Type DWord -Force
+            Set-ItemProperty -Path $cdmPath -Name "SilentInstalledAppsEnabled" -Value 0 -Type DWord -Force
+            Set-ItemProperty -Path $cdmPath -Name "SoftLandingEnabled" -Value 0 -Type DWord -Force
+            Set-ItemProperty -Path $cdmPath -Name "SubscribedContent-338388Enabled" -Value 0 -Type DWord -Force
+            Set-ItemProperty -Path $cdmPath -Name "SubscribedContent-338389Enabled" -Value 0 -Type DWord -Force
+            Set-ItemProperty -Path $cdmPath -Name "SubscribedContent-353694Enabled" -Value 0 -Type DWord -Force
+            Set-ItemProperty -Path $cdmPath -Name "SubscribedContent-353696Enabled" -Value 0 -Type DWord -Force
+            Write-Host "    Goi y ung dung / quang cao Start Menu = tat." -ForegroundColor Green
+        }
+
+        # --- Tat Windows Consumer Features (goi y cai app tu MS) ---
+        # HOAN TAC: Remove-ItemProperty -Path $cloudPath -Name "DisableWindowsConsumerFeatures"
+        $cloudPath = "HKLM:\SOFTWARE\Policies\Microsoft\Windows\CloudContent"
+        if (-not (Test-Path $cloudPath)) { New-Item -Path $cloudPath -Force | Out-Null }
+        Set-ItemProperty -Path $cloudPath -Name "DisableWindowsConsumerFeatures" -Value 1 -Type DWord -Force
+        Write-Host "    Windows Consumer Features = tat." -ForegroundColor Green
+
     } catch {
-        Log-Error "5g. Search Indexing" $_.Exception.Message
-        Log-Step "5g. Search Indexing" "LOI" $_.Exception.Message
+        Write-Host "    Loi khi chinh telemetry: $_" -ForegroundColor Red
     }
-} else {
-    Log-Step "5g. Search Indexing" "SKIP" "Khong phai HDD — giu nguyen Indexing"
 }
 
-# ---- 5h. GIỮ NGUYÊN SysMain/Superfetch + Prefetch (QUAN TRỌNG cho HDD) ----
-Write-Host ""
-Write-Host "  [5h] Gia co SysMain/Superfetch + Prefetch (GIU BAT — dung cho HDD)" -ForegroundColor White
-if ($isHDD) {
+function Set-ExplorerSettings {
+    <#
+    Hien phan mo rong file va file an trong Explorer.
+    HOAN TAC:
+      - HideFileExt: dat lai ve 1
+      - Hidden: dat lai ve 2
+    #>
+    Write-Step "Chinh Explorer: hien duoi file + file an..." "INFO"
     try {
-        # Đảm bảo SysMain đang chạy
-        $sysMainSvc = Get-Service -Name "SysMain" -ErrorAction SilentlyContinue
-        if ($null -eq $sysMainSvc) {
-            # Trên Windows 10 cũ, service tên là Superfetch
-            $sysMainSvc = Get-Service -Name "Superfetch" -ErrorAction SilentlyContinue
+        $explorerPath = "HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer\Advanced"
+
+        # Hien phan mo rong file (0 = hien, 1 = an)
+        Set-ItemProperty -Path $explorerPath -Name "HideFileExt" -Value 0 -Type DWord -Force
+        Write-Host "    Hien duoi mo rong file = bat." -ForegroundColor Green
+
+        # Hien file an (1 = hien, 2 = an)
+        Set-ItemProperty -Path $explorerPath -Name "Hidden" -Value 1 -Type DWord -Force
+        Write-Host "    Hien file an = bat." -ForegroundColor Green
+
+    } catch {
+        Write-Host "    Loi khi chinh Explorer: $_" -ForegroundColor Red
+    }
+}
+
+function Enable-LongPaths {
+    <#
+    Bat ho tro duong dan dai (> 260 ky tu).
+    HOAN TAC: Set-ItemProperty -Path $fsPath -Name "LongPathsEnabled" -Value 0
+    #>
+    Write-Step "Bat LongPathsEnabled..." "INFO"
+    try {
+        $fsPath = "HKLM:\SYSTEM\CurrentControlSet\Control\FileSystem"
+        Set-ItemProperty -Path $fsPath -Name "LongPathsEnabled" -Value 1 -Type DWord -Force
+        Write-Host "    LongPathsEnabled = 1." -ForegroundColor Green
+    } catch {
+        Write-Host "    Loi khi bat LongPaths: $_" -ForegroundColor Red
+    }
+}
+
+function Set-HighPerformancePowerPlan {
+    <#
+    Dat power plan thanh High Performance.
+    HOAN TAC: powercfg /setactive SCHEME_BALANCED
+    #>
+    Write-Step "Dat power plan High Performance..." "INFO"
+    try {
+        # GUID cua High Performance: 8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c
+        $highPerfGuid = "8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c"
+
+        # Kiem tra xem plan co ton tai khong, neu khong thi duplicate tu Balanced
+        $plans = powercfg /list
+        if (-not ($plans | Out-String).Contains($highPerfGuid)) {
+            Write-Host "    High Performance plan khong co san, thu tao tu Balanced..." -ForegroundColor Yellow
+            powercfg /duplicatescheme $highPerfGuid 2>$null
         }
-        
-        if ($null -ne $sysMainSvc) {
-            Write-Host "  > Set-Service $($sysMainSvc.Name) -StartupType Automatic" -ForegroundColor DarkYellow
-            Set-Service $sysMainSvc.Name -StartupType Automatic -ErrorAction Stop
-            if ($sysMainSvc.Status -ne "Running") {
-                Start-Service $sysMainSvc.Name -ErrorAction SilentlyContinue
+
+        powercfg /setactive $highPerfGuid
+        Write-Host "    Power plan = High Performance." -ForegroundColor Green
+    } catch {
+        Write-Host "    Loi khi dat power plan: $_" -ForegroundColor Red
+    }
+}
+
+function Invoke-WindowsTweaks {
+    <# Goi tat ca cac tinh chinh Windows #>
+    try { Remove-Bloatware } catch { Write-Host "    Loi go bloatware: $_" -ForegroundColor Red }
+    try { Set-TelemetryAndPrivacy } catch { Write-Host "    Loi telemetry: $_" -ForegroundColor Red }
+    try { Set-ExplorerSettings } catch { Write-Host "    Loi Explorer: $_" -ForegroundColor Red }
+    try { Enable-LongPaths } catch { Write-Host "    Loi LongPaths: $_" -ForegroundColor Red }
+    try { Set-HighPerformancePowerPlan } catch { Write-Host "    Loi power plan: $_" -ForegroundColor Red }
+}
+
+# ============================================================
+# PHAN 4: CAU HINH MOI TRUONG
+# ============================================================
+
+function Set-GitConfig {
+    <# Cau hinh Git: user.name, user.email, autocrlf, defaultBranch, credential.helper #>
+    Write-Step "Cau hinh Git..." "INFO"
+
+    # Lam moi PATH de nhan dien git moi cai
+    $env:Path = [System.Environment]::GetEnvironmentVariable("Path", "Machine") + ";" + `
+                [System.Environment]::GetEnvironmentVariable("Path", "User")
+
+    if (-not (Test-CommandExists "git")) {
+        Write-Host "    Git chua duoc cai. Bo qua cau hinh." -ForegroundColor Yellow
+        return
+    }
+
+    try {
+        Write-Host ""
+        Write-Host "    === CAU HINH GIT ===" -ForegroundColor Cyan
+        $gitName  = Read-Host "    Nhap Git user.name (VD: Nguyen Van A)"
+        $gitEmail = Read-Host "    Nhap Git user.email (VD: email@example.com)"
+
+        if ($gitName) {
+            git config --global user.name "$gitName"
+            Write-Host "    user.name = $gitName" -ForegroundColor Green
+        }
+        if ($gitEmail) {
+            git config --global user.email "$gitEmail"
+            Write-Host "    user.email = $gitEmail" -ForegroundColor Green
+        }
+
+        git config --global core.autocrlf true
+        git config --global init.defaultBranch main
+        git config --global credential.helper manager
+        Write-Host "    core.autocrlf = true" -ForegroundColor Green
+        Write-Host "    init.defaultBranch = main" -ForegroundColor Green
+        Write-Host "    credential.helper = manager" -ForegroundColor Green
+
+    } catch {
+        Write-Host "    Loi cau hinh Git: $_" -ForegroundColor Red
+    }
+}
+
+function Set-JavaEnvironment {
+    <#
+    Do tim JDK, dat JAVA_HOME va them vao PATH.
+    CHI chay neu phat hien JDK da cai tren may.
+    HOAN TAC:
+      [System.Environment]::SetEnvironmentVariable("JAVA_HOME", $null, "Machine")
+      # Va xoa %JAVA_HOME%\bin khoi PATH thu cong
+    #>
+    Write-Step "Kiem tra va cau hinh Java (JAVA_HOME)..." "INFO"
+
+    # Cac vi tri thuong gap cua JDK
+    $jdkSearchPaths = @(
+        "$env:ProgramFiles\Java"
+        "$env:ProgramFiles\Eclipse Adoptium"
+        "$env:ProgramFiles\AdoptOpenJDK"
+        "$env:ProgramFiles\Zulu"
+        "$env:ProgramFiles\Microsoft\jdk-*"
+        "$env:ProgramFiles\Amazon Corretto"
+        "${env:ProgramFiles(x86)}\Java"
+    )
+
+    $jdkHome = $null
+    foreach ($searchPath in $jdkSearchPaths) {
+        if (Test-Path $searchPath) {
+            # Tim thu muc JDK (co chua bin\javac.exe)
+            $jdkDirs = Get-ChildItem -Path $searchPath -Directory -ErrorAction SilentlyContinue |
+                       Where-Object {
+                           Test-Path (Join-Path $_.FullName "bin\javac.exe")
+                       } |
+                       Sort-Object Name -Descending  # Lay version moi nhat
+            if ($jdkDirs) {
+                $jdkHome = $jdkDirs[0].FullName
+                break
             }
         }
-        
-        # Đảm bảo Prefetch bật ở mức tối đa
-        $prefetchPath = "HKLM:\SYSTEM\CurrentControlSet\Control\Session Manager\Memory Management\PrefetchParameters"
-        Write-Host "  > Set EnablePrefetcher = 3, EnableSuperfetch = 3" -ForegroundColor DarkYellow
-        Set-ItemProperty -Path $prefetchPath -Name "EnablePrefetcher" -Value 3 -Type DWord -Force
-        Set-ItemProperty -Path $prefetchPath -Name "EnableSuperfetch" -Value 3 -Type DWord -Force
-
-        Log-Step "5h. SysMain/Prefetch" "OK" "GIU BAT — SysMain=Automatic, Prefetcher=3, Superfetch=3"
-    } catch {
-        Log-Error "5h. SysMain/Prefetch" $_.Exception.Message
-        Log-Step "5h. SysMain/Prefetch" "LOI" $_.Exception.Message
-    }
-} else {
-    Write-Host "  (Khong phai HDD — bo qua buoc gia co SysMain)" -ForegroundColor DarkGray
-    Log-Step "5h. SysMain/Prefetch" "SKIP" "Khong phai HDD"
-}
-
-# ---- 5i. Giảm timeout boot menu ----
-Write-Host ""
-Write-Host "  [5i] Giam timeout boot menu xuong 5 giay" -ForegroundColor White
-try {
-    Write-Host "  > bcdedit /timeout 5" -ForegroundColor DarkYellow
-    bcdedit /timeout 5 | Out-Null
-    Log-Step "5i. Boot timeout" "OK" "Da giam xuong 5 giay"
-} catch {
-    Log-Error "5i. Boot timeout" $_.Exception.Message
-    Log-Step "5i. Boot timeout" "LOI" $_.Exception.Message
-}
-
-# ---- 5j. Tối ưu bổ sung (an toàn) ----
-Write-Host ""
-Write-Host "  [5j] Toi uu bo sung (an toan)" -ForegroundColor White
-try {
-    # Tắt tips/suggestions Windows
-    $contentDeliveryPath = "HKCU:\Software\Microsoft\Windows\CurrentVersion\ContentDeliveryManager"
-    if (Test-Path $contentDeliveryPath) {
-        Write-Host "  > Tat Windows Tips, Suggested Apps" -ForegroundColor DarkYellow
-        Set-ItemProperty -Path $contentDeliveryPath -Name "SystemPaneSuggestionsEnabled" -Value 0 -Type DWord -Force -ErrorAction SilentlyContinue
-        Set-ItemProperty -Path $contentDeliveryPath -Name "SoftLandingEnabled" -Value 0 -Type DWord -Force -ErrorAction SilentlyContinue
-        Set-ItemProperty -Path $contentDeliveryPath -Name "SubscribedContent-338389Enabled" -Value 0 -Type DWord -Force -ErrorAction SilentlyContinue
-        Set-ItemProperty -Path $contentDeliveryPath -Name "SubscribedContent-310093Enabled" -Value 0 -Type DWord -Force -ErrorAction SilentlyContinue
-        Set-ItemProperty -Path $contentDeliveryPath -Name "SubscribedContent-338388Enabled" -Value 0 -Type DWord -Force -ErrorAction SilentlyContinue
     }
 
-    # Tắt hiển thị trạng thái lock screen
-    $lockScreenPath = "HKLM:\SOFTWARE\Policies\Microsoft\Windows\Personalization"
-    if (-not (Test-Path $lockScreenPath)) { New-Item -Path $lockScreenPath -Force | Out-Null }
-    Set-ItemProperty -Path $lockScreenPath -Name "NoLockScreen" -Value 1 -Type DWord -Force -ErrorAction SilentlyContinue
-
-    # Tắt People icon trên taskbar
-    $peoplePath = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced\People"
-    if (-not (Test-Path $peoplePath)) { New-Item -Path $peoplePath -Force | Out-Null }
-    Set-ItemProperty -Path $peoplePath -Name "PeopleBand" -Value 0 -Type DWord -Force
-
-    # Tắt News and Interests trên taskbar (Windows 10 21H1+)
-    $feedsPath = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Feeds"
-    if (-not (Test-Path $feedsPath)) { New-Item -Path $feedsPath -Force | Out-Null }
-    Set-ItemProperty -Path $feedsPath -Name "ShellFeedsTaskbarViewMode" -Value 2 -Type DWord -Force
-
-    # Tắt Startup delay
-    $serializePath = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Explorer\Serialize"
-    if (-not (Test-Path $serializePath)) { New-Item -Path $serializePath -Force | Out-Null }
-    Set-ItemProperty -Path $serializePath -Name "StartupDelayInMSec" -Value 0 -Type DWord -Force
-
-    Log-Step "5j. Toi uu bo sung" "OK" "Tat tips, suggestions, news, People, startup delay"
-} catch {
-    Log-Error "5j. Toi uu bo sung" $_.Exception.Message
-    Log-Step "5j. Toi uu bo sung" "LOI" $_.Exception.Message
-}
-
-# ---- 5k. Tối ưu Chrome cho HDD (giảm I/O đĩa) ----
-Write-Host ""
-Write-Host "  [5k] Toi uu Google Chrome cho HDD (giam I/O dia)" -ForegroundColor White
-try {
-    # --- 5k-1. Tắt Software Reporter Tool (chrome_cleanup_tool) ---
-    # Tool này quét toàn bộ ổ đĩa, cực kỳ nặng I/O trên HDD
-    $srtPath = "HKLM:\SOFTWARE\Policies\Google\Chrome"
-    if (-not (Test-Path $srtPath)) { New-Item -Path $srtPath -Force | Out-Null }
-    Write-Host "  > Tat Software Reporter Tool (ChromeCleanupEnabled=0)" -ForegroundColor DarkYellow
-    Set-ItemProperty -Path $srtPath -Name "ChromeCleanupEnabled" -Value 0 -Type DWord -Force
-    Set-ItemProperty -Path $srtPath -Name "ChromeCleanupReportingEnabled" -Value 0 -Type DWord -Force
-
-    # Chặn file exe của Software Reporter Tool
-    $srtExeDir = "$env:LOCALAPPDATA\Google\Chrome\User Data\SwReporter"
-    if (Test-Path $srtExeDir) {
-        Write-Host "  > Chan quyen thuc thi SwReporter" -ForegroundColor DarkYellow
-        icacls $srtExeDir /deny "*S-1-1-0:(OI)(CI)(RX)" 2>&1 | Out-Null
+    if (-not $jdkHome) {
+        Write-Host "    Khong tim thay JDK tren may. Bo qua." -ForegroundColor Yellow
+        Write-Host "    Ban co the cai JDK sau roi chay lai script." -ForegroundColor Yellow
+        $null = $script:results.ManualNeeded.Add("Java JDK - Chua cai, can cai thu cong")
+        return
     }
 
-    # --- 5k-2. Giới hạn Disk Cache xuống 100MB ---
-    # Mặc định Chrome cache không giới hạn, gây ghi liên tục trên HDD
-    Write-Host "  > Gioi han Disk Cache = 104857600 (100MB)" -ForegroundColor DarkYellow
-    Set-ItemProperty -Path $srtPath -Name "DiskCacheSize" -Value 104857600 -Type DWord -Force
+    Write-Host "    Tim thay JDK tai: $jdkHome" -ForegroundColor Green
 
-    # --- 5k-3. Tắt Prefetch / Prerender trang web ---
-    # Giảm I/O bằng cách không tải trước các trang
-    Write-Host "  > Tat NetworkPrediction (prefetch/prerender)" -ForegroundColor DarkYellow
-    Set-ItemProperty -Path $srtPath -Name "NetworkPredictionOptions" -Value 2 -Type DWord -Force
-    # 0=Always, 1=Wifi only, 2=Never
-
-    # --- 5k-4. Tắt Chrome chạy nền khi đóng trình duyệt ---
-    Write-Host "  > Tat BackgroundModeEnabled" -ForegroundColor DarkYellow
-    Set-ItemProperty -Path $srtPath -Name "BackgroundModeEnabled" -Value 0 -Type DWord -Force
-
-    # --- 5k-5. Tắt tự động cập nhật component (giảm ghi đĩa nền) ---
-    Write-Host "  > Tat ComponentUpdatesEnabled" -ForegroundColor DarkYellow
-    Set-ItemProperty -Path $srtPath -Name "ComponentUpdatesEnabled" -Value 0 -Type DWord -Force
-
-    # --- 5k-6. Tắt đồng bộ tự động (giảm ghi đĩa liên tục) ---
-    # Người dùng vẫn có thể bật lại thủ công trong Chrome
-    Write-Host "  > Tat SyncDisabled (giam ghi dia lien tuc)" -ForegroundColor DarkYellow
-    Set-ItemProperty -Path $srtPath -Name "SyncDisabled" -Value 1 -Type DWord -Force
-
-    # --- 5k-7. Tắt metrics/reporting (giảm ghi log nền) ---
-    Write-Host "  > Tat MetricsReportingEnabled" -ForegroundColor DarkYellow
-    Set-ItemProperty -Path $srtPath -Name "MetricsReportingEnabled" -Value 0 -Type DWord -Force
-
-    # --- 5k-8. Giảm số process renderer (giảm RAM + swap trên HDD) ---
-    Write-Host "  > Gioi han RendererProcessLimit = 4" -ForegroundColor DarkYellow
-    Set-ItemProperty -Path $srtPath -Name "RendererProcessLimit" -Value 4 -Type DWord -Force
-
-    # --- 5k-9. Thêm launch flags tối ưu vào Chrome shortcut ---
-    # Tạo file batch để user có thể dùng
-    $chromeFlags = @(
-        "--disk-cache-size=104857600",   # 100MB cache
-        "--disable-background-networking",
-        "--disable-component-update",
-        "--disable-features=OptimizationHints,MediaRouter"
-    )
-    $chromeFlagsStr = $chromeFlags -join " "
-
-    # Tìm Chrome exe
-    $chromeExe = $null
-    $chromePaths = @(
-        "$env:ProgramFiles\Google\Chrome\Application\chrome.exe",
-        "${env:ProgramFiles(x86)}\Google\Chrome\Application\chrome.exe",
-        "$env:LOCALAPPDATA\Google\Chrome\Application\chrome.exe"
-    )
-    foreach ($p in $chromePaths) {
-        if (Test-Path $p) { $chromeExe = $p; break }
-    }
-
-    if ($null -ne $chromeExe) {
-        # Tạo shortcut tối ưu trên Desktop
-        $desktopPath = [Environment]::GetFolderPath("Desktop")
-        $shortcutPath = "$desktopPath\Chrome (HDD Optimized).lnk"
-        $WshShell = New-Object -ComObject WScript.Shell
-        $shortcut = $WshShell.CreateShortcut($shortcutPath)
-        $shortcut.TargetPath = $chromeExe
-        $shortcut.Arguments = $chromeFlagsStr
-        $shortcut.Description = "Google Chrome - Toi uu cho HDD"
-        $shortcut.Save()
-        Write-Host "  > Da tao shortcut: $shortcutPath" -ForegroundColor DarkYellow
-    }
-
-    Log-Step "5k. Chrome HDD Optimize" "OK" "Tat SRT, cache 100MB, tat prefetch/background/sync/metrics, gioi han renderer"
-} catch {
-    Log-Error "5k. Chrome HDD Optimize" $_.Exception.Message
-    Log-Step "5k. Chrome HDD Optimize" "LOI" $_.Exception.Message
-}
-
-# ============================================================================
-# BƯỚC 6: DỌN FILE TẠM / CACHE
-# ============================================================================
-Write-Host ""
-Write-Host "=" * 70 -ForegroundColor DarkGray
-Write-Host "BUOC 6: Don file tam / cache" -ForegroundColor Cyan
-Write-Host "=" * 70 -ForegroundColor DarkGray
-
-$totalCleaned = 0
-
-# 6a. %TEMP%
-try {
-    $tempPath = $env:TEMP
-    Write-Host "  > Don $tempPath" -ForegroundColor DarkYellow
-    $tempFiles = Get-ChildItem -Path $tempPath -Recurse -Force -ErrorAction SilentlyContinue
-    $tempSize = ($tempFiles | Measure-Object -Property Length -Sum -ErrorAction SilentlyContinue).Sum
-    $tempFiles | Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
-    $cleanedMB = [math]::Round($tempSize / 1MB, 2)
-    $totalCleaned += $tempSize
-    Log-Step "6a. %TEMP%" "OK" "Da don ~${cleanedMB} MB"
-} catch {
-    Log-Error "6a. %TEMP%" $_.Exception.Message
-}
-
-# 6b. C:\Windows\Temp
-try {
-    $winTemp = "C:\Windows\Temp"
-    Write-Host "  > Don $winTemp" -ForegroundColor DarkYellow
-    $winTempFiles = Get-ChildItem -Path $winTemp -Recurse -Force -ErrorAction SilentlyContinue
-    $winTempSize = ($winTempFiles | Measure-Object -Property Length -Sum -ErrorAction SilentlyContinue).Sum
-    $winTempFiles | Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
-    $cleanedMB = [math]::Round($winTempSize / 1MB, 2)
-    $totalCleaned += $winTempSize
-    Log-Step "6b. Windows\\Temp" "OK" "Da don ~${cleanedMB} MB"
-} catch {
-    Log-Error "6b. Windows\\Temp" $_.Exception.Message
-}
-
-# 6c. Recycle Bin
-try {
-    Write-Host "  > Don Recycle Bin" -ForegroundColor DarkYellow
-    Clear-RecycleBin -Force -ErrorAction SilentlyContinue
-    Log-Step "6c. Recycle Bin" "OK" "Da don sach Recycle Bin"
-} catch {
-    Log-Error "6c. Recycle Bin" $_.Exception.Message
-    Log-Step "6c. Recycle Bin" "LOI" $_.Exception.Message
-}
-
-# 6d. C:\Windows\SoftwareDistribution\Download
-try {
-    $swDistPath = "C:\Windows\SoftwareDistribution\Download"
-    Write-Host "  > Don $swDistPath" -ForegroundColor DarkYellow
-    
-    # Dừng Windows Update tạm để xóa cache
-    Stop-Service "wuauserv" -Force -ErrorAction SilentlyContinue
-    
-    $swDistFiles = Get-ChildItem -Path $swDistPath -Recurse -Force -ErrorAction SilentlyContinue
-    $swDistSize = ($swDistFiles | Measure-Object -Property Length -Sum -ErrorAction SilentlyContinue).Sum
-    $swDistFiles | Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
-    $cleanedMB = [math]::Round($swDistSize / 1MB, 2)
-    $totalCleaned += $swDistSize
-    
-    # Khởi động lại Windows Update
-    Start-Service "wuauserv" -ErrorAction SilentlyContinue
-    
-    Log-Step "6d. SoftwareDistribution" "OK" "Da don ~${cleanedMB} MB (WU da khoi dong lai)"
-} catch {
-    # Đảm bảo Windows Update luôn được bật lại
-    Start-Service "wuauserv" -ErrorAction SilentlyContinue
-    Log-Error "6d. SoftwareDistribution" $_.Exception.Message
-}
-
-$totalCleanedMB = [math]::Round($totalCleaned / 1MB, 2)
-Write-Host ""
-Write-Host "  TONG CONG DA DON: ~$totalCleanedMB MB" -ForegroundColor Green
-
-# ============================================================================
-# BƯỚC 7: CHỐNG PHÂN MẢNH Ổ HDD
-# ============================================================================
-Write-Host ""
-Write-Host "=" * 70 -ForegroundColor DarkGray
-Write-Host "BUOC 7: Chong phan manh o he thong (Defrag)" -ForegroundColor Cyan
-Write-Host "=" * 70 -ForegroundColor DarkGray
-
-if ($isHDD) {
     try {
-        Write-Host "  > defrag C: /O" -ForegroundColor DarkYellow
-        Write-Host "  (Qua trinh nay co the mat vai phut den vai gio tuy muc do phan manh)" -ForegroundColor DarkGray
-        Write-Host "  Dang chay defrag..." -ForegroundColor Yellow
-        
-        $defragResult = & defrag C: /O 2>&1
-        $defragStr = $defragResult -join "`n"
-        
-        if ($defragStr -match "successfully" -or $defragStr -match "completed") {
-            Log-Step "7. Defrag" "OK" "Da chong phan manh o C: thanh cong"
-        } else {
-            Log-Step "7. Defrag" "OK" "Da chay defrag C: /O"
+        # Dat JAVA_HOME (Machine scope)
+        [System.Environment]::SetEnvironmentVariable("JAVA_HOME", $jdkHome, "Machine")
+        $env:JAVA_HOME = $jdkHome
+        Write-Host "    JAVA_HOME = $jdkHome" -ForegroundColor Green
+
+        # Them %JAVA_HOME%\bin vao PATH (Machine) neu chua co
+        $machinePath = [System.Environment]::GetEnvironmentVariable("Path", "Machine")
+        $javaBinEntry = "%JAVA_HOME%\bin"
+        $javaBinActual = "$jdkHome\bin"
+
+        # Kiem tra xem da co trong PATH chua (ca dang bien lan dang tuyet doi)
+        $pathEntries = $machinePath -split ";"
+        $alreadyInPath = $false
+        foreach ($entry in $pathEntries) {
+            $expanded = [System.Environment]::ExpandEnvironmentVariables($entry)
+            if ($expanded -eq $javaBinActual -or $entry -eq $javaBinEntry) {
+                $alreadyInPath = $true
+                break
+            }
         }
-        Write-Host $defragStr -ForegroundColor DarkGray
+
+        if (-not $alreadyInPath) {
+            $newPath = $machinePath.TrimEnd(";") + ";$javaBinEntry"
+            [System.Environment]::SetEnvironmentVariable("Path", $newPath, "Machine")
+            Write-Host "    Da them %JAVA_HOME%\bin vao PATH (Machine)." -ForegroundColor Green
+        } else {
+            Write-Host "    %JAVA_HOME%\bin da co trong PATH." -ForegroundColor Green
+        }
+
+        # Cap nhat PATH cua process hien tai
+        $env:Path = [System.Environment]::GetEnvironmentVariable("Path", "Machine") + ";" + `
+                    [System.Environment]::GetEnvironmentVariable("Path", "User")
+
     } catch {
-        Log-Error "7. Defrag" $_.Exception.Message
-        Log-Step "7. Defrag" "LOI" $_.Exception.Message
+        Write-Host "    Loi khi dat JAVA_HOME: $_" -ForegroundColor Red
     }
-} else {
-    Log-Step "7. Defrag" "SKIP" "Khong phai HDD — KHONG chay defrag (co hai cho SSD)"
-    Write-Host "  ⚠ O dia la SSD. Defrag KHONG duoc chay tren SSD." -ForegroundColor Yellow
 }
 
-# ============================================================================
-# BƯỚC 8: TÓM TẮT KẾT QUẢ
-# ============================================================================
-Write-Host ""
-Write-Host "=" * 70 -ForegroundColor DarkGray
-Write-Host "BUOC 8: TOM TAT KET QUA" -ForegroundColor Cyan
-Write-Host "=" * 70 -ForegroundColor DarkGray
-Write-Host ""
+function Test-InstalledTools {
+    <# Kiem tra phien ban cac cong cu da cai #>
+    Write-Step "Kiem tra phien ban cac cong cu..." "INFO"
 
-Write-Host "╔══════════════════════════════════════════════════════════════════╗" -ForegroundColor Cyan
-Write-Host "║                    BAO CAO TOI UU HE THONG                     ║" -ForegroundColor Cyan
-Write-Host "╚══════════════════════════════════════════════════════════════════╝" -ForegroundColor Cyan
-Write-Host ""
+    # Lam moi PATH
+    $env:Path = [System.Environment]::GetEnvironmentVariable("Path", "Machine") + ";" + `
+                [System.Environment]::GetEnvironmentVariable("Path", "User")
 
-# Bảng kết quả
-Write-Host "  BUOC                          | TRANG THAI | CHI TIET" -ForegroundColor White
-Write-Host "  " + ("-" * 65) -ForegroundColor DarkGray
-
-foreach ($r in $script:Results) {
-    $stepPad = $r.Buoc.PadRight(30)
-    $statusPad = $r.TrangThai.PadRight(10)
-    $color = if ($r.TrangThai -eq "OK") { "Green" } 
-             elseif ($r.TrangThai -eq "SKIP") { "Yellow" } 
-             else { "Red" }
-    Write-Host "  $stepPad | " -NoNewline
-    Write-Host "$statusPad" -NoNewline -ForegroundColor $color
-    Write-Host " | $($r.ChiTiet)"
-}
-
-# Hiển thị lỗi nếu có
-if ($script:Errors.Count -gt 0) {
     Write-Host ""
-    Write-Host "  ⚠ CAC LOI GAP PHAI:" -ForegroundColor Red
-    foreach ($e in $script:Errors) {
-        Write-Host "    - $($e.Buoc): $($e.Loi)" -ForegroundColor Red
+    Write-Host "    === KIEM TRA CONG CU ===" -ForegroundColor Cyan
+
+    # Git
+    if (Test-CommandExists "git") {
+        $gitVer = git --version 2>$null
+        Write-Host "    git:    $gitVer" -ForegroundColor Green
+    } else {
+        Write-Host "    git:    KHONG TIM THAY" -ForegroundColor Yellow
     }
+
+    # Docker
+    if (Test-CommandExists "docker") {
+        $dockerVer = docker --version 2>$null
+        Write-Host "    docker: $dockerVer" -ForegroundColor Green
+    } else {
+        Write-Host "    docker: KHONG TIM THAY (co the can khoi dong lai)" -ForegroundColor Yellow
+    }
+
+    # Java
+    if (Test-CommandExists "java") {
+        $javaVer = java -version 2>&1 | Select-Object -First 1
+        Write-Host "    java:   $javaVer" -ForegroundColor Green
+    } else {
+        Write-Host "    java:   KHONG TIM THAY" -ForegroundColor Yellow
+    }
+
+    Write-Host ""
 }
 
-Write-Host ""
-Write-Host "  AN TOAN:" -ForegroundColor Green
-Write-Host "    ✓ Windows Defender:  KHONG BI TAT" -ForegroundColor Green
-Write-Host "    ✓ Windows Firewall:  KHONG BI TAT" -ForegroundColor Green
-Write-Host "    ✓ Windows Update:    KHONG BI TAT" -ForegroundColor Green
-Write-Host "    ✓ Restore Point:     DA TAO" -ForegroundColor Green
-if ($isHDD) {
-    Write-Host "    ✓ SysMain/Prefetch:  GIU BAT (dung cho HDD)" -ForegroundColor Green
+# ============================================================
+# BANG TONG KET
+# ============================================================
+
+function Show-Summary {
+    <# In bang tong ket 4 nhom ket qua #>
+    Write-Host ""
+    Write-Host "================================================================" -ForegroundColor Cyan
+    Write-Host "                     BANG TONG KET SETUP                        " -ForegroundColor Cyan
+    Write-Host "================================================================" -ForegroundColor Cyan
+
+    Write-Host ""
+    Write-Host "[DA CAI MOI]" -ForegroundColor Green
+    if ($script:results.Installed.Count -gt 0) {
+        foreach ($item in $script:results.Installed) {
+            Write-Host "  + $item" -ForegroundColor Green
+        }
+    } else {
+        Write-Host "  (khong co)" -ForegroundColor Gray
+    }
+
+    Write-Host ""
+    Write-Host "[DA CO SAN - BO QUA]" -ForegroundColor Yellow
+    if ($script:results.AlreadyHave.Count -gt 0) {
+        foreach ($item in $script:results.AlreadyHave) {
+            Write-Host "  ~ $item" -ForegroundColor Yellow
+        }
+    } else {
+        Write-Host "  (khong co)" -ForegroundColor Gray
+    }
+
+    Write-Host ""
+    Write-Host "[THAT BAI]" -ForegroundColor Red
+    if ($script:results.Failed.Count -gt 0) {
+        foreach ($item in $script:results.Failed) {
+            Write-Host "  X $item" -ForegroundColor Red
+        }
+    } else {
+        Write-Host "  (khong co)" -ForegroundColor Gray
+    }
+
+    Write-Host ""
+    Write-Host "[CAN CAI THU CONG]" -ForegroundColor Magenta
+    if ($script:results.ManualNeeded.Count -gt 0) {
+        foreach ($item in $script:results.ManualNeeded) {
+            Write-Host "  ! $item" -ForegroundColor Magenta
+        }
+    } else {
+        Write-Host "  (khong co)" -ForegroundColor Gray
+    }
+
+    Write-Host ""
+    Write-Host "================================================================" -ForegroundColor Cyan
+
+    if ($script:needReboot) {
+        Write-Host ""
+        Write-Host "[!!!] CAN KHOI DONG LAI MAY de hoan tat (WSL / VirtualMachinePlatform)." -ForegroundColor Yellow
+        Write-Host "      Sau khi khoi dong lai, mo Docker Desktop de hoan tat cai dat." -ForegroundColor Yellow
+    }
+
+    Write-Host ""
+    Write-Host "Log file: $logFile" -ForegroundColor Cyan
+    Write-Host ""
 }
-Write-Host ""
-Write-Host "  DUNG LUONG DA DON: ~$totalCleanedMB MB" -ForegroundColor Cyan
-Write-Host ""
 
-Write-Host "╔══════════════════════════════════════════════════════════════════╗" -ForegroundColor Yellow
-Write-Host "║  ⚠  KHUYEN NGHI: KHOI DONG LAI MAY DE AP DUNG TAT CA         ║" -ForegroundColor Yellow
-Write-Host "║     CAC THAY DOI (dac biet Visual Effects, Services, Boot).    ║" -ForegroundColor Yellow
-Write-Host "╚══════════════════════════════════════════════════════════════════╝" -ForegroundColor Yellow
-Write-Host ""
+# ============================================================
+# CHAY CHINH
+# ============================================================
 
-$restart = Read-Host "Ban co muon khoi dong lai may ngay bay gio? (Y/N)"
-if ($restart -eq "Y" -or $restart -eq "y") {
-    Write-Host "  Khoi dong lai sau 10 giay... (shutdown /r /t 10)" -ForegroundColor Yellow
-    shutdown /r /t 10
-} else {
-    Write-Host "  OK. Hay khoi dong lai khi thuan tien." -ForegroundColor Cyan
-}
+$script:needReboot = $false
+
+# Tinh tong so buoc (2 buoc chuan bi + so app + 5 tinh chinh + 3 cau hinh + 1 kiem tra)
+$script:totalSteps = 2 + $appList.Count + 5 + 3 + 1
 
 Write-Host ""
-Write-Host "Hoan tat! Cam on ban da su dung script toi uu." -ForegroundColor Green
-Read-Host "Nhan Enter de dong cua so nay"
+Write-Host "================================================================" -ForegroundColor Cyan
+Write-Host "  SETUP-PC: Thiet lap may moi - Windows 10 Home               " -ForegroundColor Cyan
+Write-Host "  Bat dau: $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')                        " -ForegroundColor Cyan
+Write-Host "================================================================" -ForegroundColor Cyan
+Write-Host ""
+
+# --- Phan 1: Chuan bi ---
+Write-Host "=== PHAN 1: CHUAN BI CONG CU CAI DAT ===" -ForegroundColor Cyan
+Initialize-PackageManagers
+
+# --- Phan 2: Cai ung dung ---
+Write-Host ""
+Write-Host "=== PHAN 2: CAI UNG DUNG ===" -ForegroundColor Cyan
+Install-Applications
+
+# --- Phan 3: Tinh chinh Windows ---
+Write-Host ""
+Write-Host "=== PHAN 3: TINH CHINH WINDOWS ===" -ForegroundColor Cyan
+Invoke-WindowsTweaks
+
+# --- Phan 4: Cau hinh moi truong ---
+Write-Host ""
+Write-Host "=== PHAN 4: CAU HINH MOI TRUONG ===" -ForegroundColor Cyan
+Set-GitConfig
+Set-JavaEnvironment
+Test-InstalledTools
+
+# --- Tong ket ---
+Show-Summary
+
+Stop-Transcript
+
+Write-Host "Nhan Enter de dong cua so nay..." -ForegroundColor Cyan
+Read-Host
