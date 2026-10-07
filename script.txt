@@ -1,23 +1,21 @@
-<#
-========================================================================
-  SETUP-PC.PS1  -  Thiet lap may moi (Windows 10 Home)
-========================================================================
-  Huong dan su dung:
-    1. Tai file setup-pc.txt ve (Raw tu GitHub hoac download truc tiep).
-    2. Doi duoi thanh .ps1:
-         Rename-Item .\setup-pc.txt setup-pc.ps1
-    3. Bo chan file tai tu Internet:
-         Unblock-File .\setup-pc.ps1
-    4. Mo PowerShell voi quyen Administrator, chay:
-         powershell -ExecutionPolicy Bypass -File .\setup-pc.ps1
-
-  Yeu cau: Windows 10 Home, PowerShell 5.1, quyen Administrator.
-  Muc dich: May lap trinh Java + van phong.
-  Luu y:
-    - Sau khi bat WSL/VirtualMachinePlatform, can KHOI DONG LAI may.
-    - Can bat Virtualization (VT-x / AMD-V) trong BIOS truoc khi dung Docker.
-========================================================================
-#>
+# ========================================================================
+#   SETUP-PC.PS1  -  Thiet lap may moi (Windows 10 Home)
+# ========================================================================
+#   Huong dan su dung:
+#     1. Tai file setup-pc.txt ve (Raw tu GitHub hoac download truc tiep).
+#     2. Doi duoi thanh .ps1:
+#          Rename-Item .\setup-pc.txt setup-pc.ps1
+#     3. Bo chan file tai tu Internet:
+#          Unblock-File .\setup-pc.ps1
+#     4. Mo PowerShell voi quyen Administrator, chay:
+#          powershell -ExecutionPolicy Bypass -File .\setup-pc.ps1
+#
+#   Yeu cau: Windows 10 Home, PowerShell 5.1, quyen Administrator.
+#   Muc dich: May lap trinh Java + van phong.
+#   Luu y:
+#     - Sau khi bat WSL/VirtualMachinePlatform, can KHOI DONG LAI may.
+#     - Can bat Virtualization (VT-x / AMD-V) trong BIOS truoc khi dung Docker.
+# ========================================================================
 
 # ============================================================
 # KIEM TRA QUYEN ADMIN - Tu nang cap neu chua co
@@ -180,7 +178,7 @@ $bloatwareList = @(
 # ============================================================
 
 function Write-Step {
-    <# In tien trinh buoc hien tai #>
+    # In tien trinh buoc hien tai
     param(
         [string]$Message,
         [string]$Status = "INFO"   # INFO, OK, SKIP, FAIL
@@ -196,13 +194,13 @@ function Write-Step {
 }
 
 function Test-CommandExists {
-    <# Kiem tra mot lenh co ton tai trong PATH khong #>
+    # Kiem tra mot lenh co ton tai trong PATH khong
     param([string]$Command)
     $null -ne (Get-Command $Command -ErrorAction SilentlyContinue)
 }
 
 function Test-AppInstalledWinget {
-    <# Kiem tra app da cai qua winget chua (theo ID) #>
+    # Kiem tra app da cai qua winget chua (theo ID)
     param([string]$WingetId)
     if (-not (Test-CommandExists "winget")) { return $false }
     $listOutput = winget list --id $WingetId --accept-source-agreements 2>$null
@@ -211,7 +209,7 @@ function Test-AppInstalledWinget {
 }
 
 function Test-AppInstalledChoco {
-    <# Kiem tra app da cai qua Chocolatey chua #>
+    # Kiem tra app da cai qua Chocolatey chua
     param([string]$ChocoId)
     if (-not (Test-CommandExists "choco")) { return $false }
     $listOutput = choco list --local-only --exact $ChocoId 2>$null
@@ -219,7 +217,7 @@ function Test-AppInstalledChoco {
 }
 
 function Install-WithWinget {
-    <# Cai app bang winget, tra ve $true neu thanh cong #>
+    # Cai app bang winget, tra ve $true neu thanh cong
     param([string]$WingetId)
     if (-not (Test-CommandExists "winget")) { return $false }
     try {
@@ -234,7 +232,7 @@ function Install-WithWinget {
 }
 
 function Install-WithChoco {
-    <# Cai app bang Chocolatey, tra ve $true neu thanh cong #>
+    # Cai app bang Chocolatey, tra ve $true neu thanh cong
     param([string]$ChocoId)
     if (-not (Test-CommandExists "choco")) { return $false }
     try {
@@ -249,7 +247,7 @@ function Install-WithChoco {
 }
 
 function Search-PackageWinget {
-    <# Tim app tren winget, tra ve ID neu tim thay ket qua khop chinh xac #>
+    # Tim app tren winget, tra ve ID neu tim thay ket qua khop chinh xac
     param([string]$AppName)
     if (-not (Test-CommandExists "winget")) { return $null }
     try {
@@ -274,7 +272,7 @@ function Search-PackageWinget {
 }
 
 function Search-PackageChoco {
-    <# Tim app tren Chocolatey, tra ve ID neu tim thay ket qua khop chinh xac #>
+    # Tim app tren Chocolatey, tra ve ID neu tim thay ket qua khop chinh xac
     param([string]$AppName)
     if (-not (Test-CommandExists "choco")) { return $null }
     try {
@@ -300,7 +298,7 @@ function Search-PackageChoco {
 # ============================================================
 
 function Initialize-PackageManagers {
-    <# Kiem tra va cai dat winget + Chocolatey #>
+    # Kiem tra va cai dat winget + Chocolatey
 
     # --- Kiem tra winget ---
     Write-Step "Kiem tra winget..." "INFO"
@@ -348,12 +346,10 @@ function Initialize-PackageManagers {
 # ============================================================
 
 function Enable-WSL2ForDocker {
-    <#
-    Bat WSL va VirtualMachinePlatform cho Docker Desktop tren Win10 Home.
-    Yeu cau build >= 19041.
-    HOAN TAC: Disable-WindowsOptionalFeature -Online -FeatureName Microsoft-Windows-Subsystem-Linux
-              Disable-WindowsOptionalFeature -Online -FeatureName VirtualMachinePlatform
-    #>
+    # Bat WSL va VirtualMachinePlatform cho Docker Desktop tren Win10 Home.
+    # Yeu cau build >= 19041.
+    # HOAN TAC: Disable-WindowsOptionalFeature -Online -FeatureName Microsoft-Windows-Subsystem-Linux
+    #           Disable-WindowsOptionalFeature -Online -FeatureName VirtualMachinePlatform
     Write-Host "    [Docker Pre] Kiem tra yeu cau WSL2..." -ForegroundColor Cyan
 
     if ($osBuild -lt 19041) {
@@ -403,7 +399,7 @@ function Enable-WSL2ForDocker {
 # ============================================================
 
 function Install-Applications {
-    <# Cai tat ca app trong $appList #>
+    # Cai tat ca app trong $appList
     foreach ($app in $appList) {
         $name = $app.Name
         Write-Step "Xu ly: $name" "INFO"
@@ -486,11 +482,9 @@ function Install-Applications {
 # ============================================================
 
 function Remove-Bloatware {
-    <#
-    Go cac app bloatware pho bien cua Win10.
-    Chi go tu danh sach an toan, KHONG go Store, Calculator, Photos.
-    HOAN TAC: Cai lai tu Microsoft Store.
-    #>
+    # Go cac app bloatware pho bien cua Win10.
+    # Chi go tu danh sach an toan, KHONG go Store, Calculator, Photos.
+    # HOAN TAC: Cai lai tu Microsoft Store.
     Write-Step "Go bloatware Win10..." "INFO"
     foreach ($appName in $bloatwareList) {
         try {
@@ -513,14 +507,12 @@ function Remove-Bloatware {
 }
 
 function Set-TelemetryAndPrivacy {
-    <#
-    Giam telemetry va tat quang cao bang Registry.
-    HOAN TAC cho tung key:
-      - AllowTelemetry: dat lai ve 3 (Full)
-      - AdvertisingInfo: dat Enabled ve 1
-      - ContentDeliveryManager: dat cac gia tri ve 1
-      - CloudContent: xoa key DisableWindowsConsumerFeatures
-    #>
+    # Giam telemetry va tat quang cao bang Registry.
+    # HOAN TAC cho tung key:
+    #   - AllowTelemetry: dat lai ve 3 (Full)
+    #   - AdvertisingInfo: dat Enabled ve 1
+    #   - ContentDeliveryManager: dat cac gia tri ve 1
+    #   - CloudContent: xoa key DisableWindowsConsumerFeatures
     Write-Step "Giam telemetry va tat quang cao..." "INFO"
 
     try {
@@ -565,12 +557,10 @@ function Set-TelemetryAndPrivacy {
 }
 
 function Set-ExplorerSettings {
-    <#
-    Hien phan mo rong file va file an trong Explorer.
-    HOAN TAC:
-      - HideFileExt: dat lai ve 1
-      - Hidden: dat lai ve 2
-    #>
+    # Hien phan mo rong file va file an trong Explorer.
+    # HOAN TAC:
+    #   - HideFileExt: dat lai ve 1
+    #   - Hidden: dat lai ve 2
     Write-Step "Chinh Explorer: hien duoi file + file an..." "INFO"
     try {
         $explorerPath = "HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer\Advanced"
@@ -589,10 +579,8 @@ function Set-ExplorerSettings {
 }
 
 function Enable-LongPaths {
-    <#
-    Bat ho tro duong dan dai (> 260 ky tu).
-    HOAN TAC: Set-ItemProperty -Path $fsPath -Name "LongPathsEnabled" -Value 0
-    #>
+    # Bat ho tro duong dan dai (> 260 ky tu).
+    # HOAN TAC: Set-ItemProperty -Path $fsPath -Name "LongPathsEnabled" -Value 0
     Write-Step "Bat LongPathsEnabled..." "INFO"
     try {
         $fsPath = "HKLM:\SYSTEM\CurrentControlSet\Control\FileSystem"
@@ -604,10 +592,8 @@ function Enable-LongPaths {
 }
 
 function Set-HighPerformancePowerPlan {
-    <#
-    Dat power plan thanh High Performance.
-    HOAN TAC: powercfg /setactive SCHEME_BALANCED
-    #>
+    # Dat power plan thanh High Performance.
+    # HOAN TAC: powercfg /setactive SCHEME_BALANCED
     Write-Step "Dat power plan High Performance..." "INFO"
     try {
         # GUID cua High Performance: 8c5e7fda-e8bf-4a96-9a85-a6e23a8c635c
@@ -628,7 +614,7 @@ function Set-HighPerformancePowerPlan {
 }
 
 function Invoke-WindowsTweaks {
-    <# Goi tat ca cac tinh chinh Windows #>
+    # Goi tat ca cac tinh chinh Windows
     try { Remove-Bloatware } catch { Write-Host "    Loi go bloatware: $_" -ForegroundColor Red }
     try { Set-TelemetryAndPrivacy } catch { Write-Host "    Loi telemetry: $_" -ForegroundColor Red }
     try { Set-ExplorerSettings } catch { Write-Host "    Loi Explorer: $_" -ForegroundColor Red }
@@ -641,7 +627,7 @@ function Invoke-WindowsTweaks {
 # ============================================================
 
 function Set-GitConfig {
-    <# Cau hinh Git: user.name, user.email, autocrlf, defaultBranch, credential.helper #>
+    # Cau hinh Git: user.name, user.email, autocrlf, defaultBranch, credential.helper
     Write-Step "Cau hinh Git..." "INFO"
 
     # Lam moi PATH de nhan dien git moi cai
@@ -681,13 +667,11 @@ function Set-GitConfig {
 }
 
 function Set-JavaEnvironment {
-    <#
-    Do tim JDK, dat JAVA_HOME va them vao PATH.
-    CHI chay neu phat hien JDK da cai tren may.
-    HOAN TAC:
-      [System.Environment]::SetEnvironmentVariable("JAVA_HOME", $null, "Machine")
-      # Va xoa %JAVA_HOME%\bin khoi PATH thu cong
-    #>
+    # Do tim JDK, dat JAVA_HOME va them vao PATH.
+    # CHI chay neu phat hien JDK da cai tren may.
+    # HOAN TAC:
+    #   [System.Environment]::SetEnvironmentVariable("JAVA_HOME", $null, "Machine")
+    #   Va xoa %JAVA_HOME%\bin khoi PATH thu cong
     Write-Step "Kiem tra va cau hinh Java (JAVA_HOME)..." "INFO"
 
     # Cac vi tri thuong gap cua JDK
@@ -766,7 +750,7 @@ function Set-JavaEnvironment {
 }
 
 function Test-InstalledTools {
-    <# Kiem tra phien ban cac cong cu da cai #>
+    # Kiem tra phien ban cac cong cu da cai
     Write-Step "Kiem tra phien ban cac cong cu..." "INFO"
 
     # Lam moi PATH
@@ -808,7 +792,7 @@ function Test-InstalledTools {
 # ============================================================
 
 function Show-Summary {
-    <# In bang tong ket 4 nhom ket qua #>
+    # In bang tong ket 4 nhom ket qua
     Write-Host ""
     Write-Host "================================================================" -ForegroundColor Cyan
     Write-Host "                     BANG TONG KET SETUP                        " -ForegroundColor Cyan
